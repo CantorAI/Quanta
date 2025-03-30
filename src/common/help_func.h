@@ -59,4 +59,6 @@ namespace Quanta
 	unsigned long GetPID();
 	unsigned long GetThreadID();
 	bool isAbsolutePath(const std::string& path);
+	bool isDir(const std::string& name);
+	void _mkdir(const char* dir);
 }

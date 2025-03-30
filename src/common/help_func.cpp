@@ -305,4 +305,46 @@ namespace Quanta
 
 		return false;
 	}
+	bool isDir(const std::string& name)
+	{
+		bool yes = false;
+		struct stat buffer;
+		if (stat(name.c_str(), &buffer) == 0)
+		{
+			if (buffer.st_mode & S_IFDIR)
+			{
+				yes = true;
+			}
+		}
+		return yes;
+	}
+#if (WIN32)
+#include <Windows.h>
+	void _mkdir(const char* dir)
+	{
+		CreateDirectory(dir, NULL);
+	}
+#else
+#include <dirent.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <limits.h>
+#include <cstring>	
+#include <spawn.h>
+#include <sys/wait.h>
+#include <sys/utsname.h>
+	extern char** environ; // Required for posix_spawnp
+
+
+	void _mkdir(const char* dir)
+	{
+		int state = access(dir, R_OK | W_OK);
+		if (state != 0)
+		{
+			mkdir(dir, S_IRWXU);
+		}
+	}
+#endif
 }

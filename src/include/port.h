@@ -1,6 +1,6 @@
 #pragma once
 
-#define Galaxy_API_Name "galaxy"
+#define Quanta_API_Name "quanta"
 
 #if (WIN32)
 #include <Windows.h>

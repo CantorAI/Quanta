@@ -15,6 +15,9 @@
 #define X_EXPORT
 #endif
 
+#include "QuantaHost.h"
+#include "QuantaDb.h"
+
 static bool GetCurLibInfo(void* EntryFuncName, std::string& strFullPath,
 	std::string& strFolderPath, std::string& strLibName)
 {
@@ -67,11 +70,9 @@ extern "C"  X_EXPORT void Load(void* pHost,X::Value curModule)
 	std::string strLibName;
 	GetCurLibInfo((void *)Load, strFullPath, strFolderPath, strLibName);
 	X::g_pXHost = (X::XHost*)pHost;
-	//Galaxy::Factory::I().SetGalaxyPath(strFolderPath, strLibName);
-	//X::RegisterPackage<Galaxy::Factory>(strLibName.c_str(),Galaxy_API_Name, &Galaxy::Factory::I());
-	//X::RegisterPackage<Galaxy::BaseFilter>(strLibName.c_str(), "BaseFilter");
-
-
+	Quanta::QuantaDb::I().Start(strFolderPath); // Start the database
+	Quanta::QuantaHost::I().SetPath(strFolderPath, strLibName);
+	X::RegisterPackage<Quanta::QuantaHost>(strLibName.c_str(), Quanta_API_Name, &Quanta::QuantaHost::I());
 }
 extern "C"  X_EXPORT void Unload()
 {
