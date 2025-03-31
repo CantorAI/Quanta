@@ -8,6 +8,7 @@
 #include "Locker.h"
 #include "help_func.h"
 #include "DfsEng.h"
+#include "log.h"
 
 namespace Quanta
 {
@@ -84,6 +85,7 @@ namespace Quanta
             }
             m_cantor = cantor;
             m_log = cantor["log_nolineend"];
+            InitLog(m_log);
 
             std::string strNodeId = GetNodeIdString();
             m_nodeId = UIDFromString(strNodeId);

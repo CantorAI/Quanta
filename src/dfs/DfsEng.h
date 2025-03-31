@@ -15,7 +15,9 @@ namespace Quanta
 
         // Internal helper methods
         std::string GenerateMetadata(const std::string& filePath, long long fileSize, const std::string& lastModified);
-
+        bool Scan(std::string rootFolder, const std::vector<std::string>& excludeFolders = {}, bool skipHidden = true);
+        void ScanFolder(const std::string& folderPath, const std::string& nodeId,
+            const std::vector<std::string>& excludeFolders, bool skipHidden);
     public:
         BEGIN_PACKAGE(DfsEngine)
             APISET().SetPackageContentProc([](void* pContextObj)
@@ -30,7 +32,7 @@ namespace Quanta
                 {
                     return ((DfsEngine*)pContextObj)->FromBytes(pStream);
                 });
-        APISET().AddFunc<1>("Scan", &DfsEngine::Scan);
+        APISET().AddFunc<1>("Scan", &DfsEngine::ScanAPI);
         APISET().AddFunc<1>("Query", &DfsEngine::Query);
         END_PACKAGE
 
@@ -38,7 +40,11 @@ namespace Quanta
         ~DfsEngine() {}
 
         // Main API methods
-        bool Scan(std::string rootFolder);
+        bool ScanAPI(std::string rootFolder)
+        {
+			std::vector<std::string> excludeFolders; // Default to empty, can be customized
+			return Scan(rootFolder, excludeFolders, true);
+        }
         X::Value Query(std::string filePattern);
 
         // Content serialization methods

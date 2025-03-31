@@ -68,10 +68,10 @@ namespace Quanta
 		int m_dumpLevel = 999999; //All level will dump out
 	};
 	extern Log log;
-	#define InitLog(logger) Galaxy::log.Init(logger)
-	#define SetLogSizeLimit(l) Galaxy::log.SetFileSizeLimit(l)
-	#define SetLogLevel(l) Galaxy::log.SetDumpLevel(l)
-	#define LOGV(level) Galaxy::log.SetCurInfo(__FILE__,__LINE__,level)
+	#define InitLog(logger) Quanta::log.Init(logger)
+	#define SetLogSizeLimit(l) Quanta::log.SetFileSizeLimit(l)
+	#define SetLogLevel(l) Quanta::log.SetDumpLevel(l)
+	#define LOGV(level) Quanta::log.SetCurInfo(__FILE__,__LINE__,level)
 	#define LOG LOGV(0)
 	#define LOG1 LOGV(1)
 	#define LOG2 LOGV(2)
@@ -82,8 +82,8 @@ namespace Quanta
 	#define LOG7 LOGV(7)
 	#define LOG8 LOGV(8)
 	#define LOG9 LOGV(9)
-	#define LINE_END Galaxy::log.LineEnd()
-	#define LOG_END Galaxy::log.End()
+	#define LINE_END Quanta::log.LineEnd()
+	#define LOG_END Quanta::log.End()
 
 	// ANSI color codes for console
 	#define LOG_RED "\033[31m"   // Red color
