@@ -9,6 +9,7 @@
 #include "help_func.h"
 #include "DfsEng.h"
 #include "log.h"
+#include "vdb.h"
 
 namespace Quanta
 {
@@ -46,6 +47,7 @@ namespace Quanta
                     return ((QuantaHost*)pContextObj)->FromBytes(pStream);
                 });
             APISET().AddClass<0, DfsEngine>("dfs");
+            APISET().AddClass<2, Vdb>("vdb");
             APISET().AddFunc<1>("SetCantor", &QuantaHost::SetCantor);
             APISET().AddPropL("cantor",
                 [](auto* pThis, X::Value v)
