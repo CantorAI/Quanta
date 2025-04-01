@@ -7,6 +7,12 @@
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #endif
+#include <string>
+#if not (WIN32)
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 namespace Quanta
 {

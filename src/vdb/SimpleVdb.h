@@ -34,8 +34,8 @@ namespace Quanta {
         }
 
         // No additional members to save/load.
-        virtual void SaveMore(ofstream& ofs) const override {}
-        virtual void LoadMore(ifstream& ifs) override {}
+        virtual void SaveMore(ofstream& ofs, const std::string& filename) const override {}
+        virtual void LoadMore(ifstream& ifs, const std::string& filename) override {}
     };
 
 } // namespace Quanta

@@ -56,22 +56,19 @@ namespace Quanta {
             return fname;
         }
 
-        virtual void SaveMore(std::ofstream& ofs) const override {
+        virtual void SaveMore(std::ofstream& ofs, const std::string& filename) const override {
             // Write extra HNSW parameters.
             ofs.write(reinterpret_cast<const char*>(&maxElements), sizeof(maxElements));
             ofs.write(reinterpret_cast<const char*>(&M), sizeof(M));
             ofs.write(reinterpret_cast<const char*>(&efConstruction), sizeof(efConstruction));
             ofs.write(reinterpret_cast<const char*>(&efSearch), sizeof(efSearch));
 
-            // Save the hnsw index to a separate file.
-            if (!indexFileName.empty()) {
-                std::string baseName = NormalizeIndexFilename(indexFileName);
-                std::string idxName = baseName + ".hnsw";
-                appr_alg->saveIndex(idxName.c_str());
-            }
+            std::string baseName = NormalizeIndexFilename(filename);
+            std::string idxName = baseName + ".hnsw";
+            appr_alg->saveIndex(idxName.c_str());
         }
 
-        virtual void LoadMore(std::ifstream& ifs) override {
+        virtual void LoadMore(std::ifstream& ifs, const std::string& filename) override {
             ifs.read(reinterpret_cast<char*>(&maxElements), sizeof(maxElements));
             ifs.read(reinterpret_cast<char*>(&M), sizeof(M));
             ifs.read(reinterpret_cast<char*>(&efConstruction), sizeof(efConstruction));
@@ -84,11 +81,9 @@ namespace Quanta {
             }
             appr_alg = new hnswlib::HierarchicalNSW<float>(l2space, maxElements, M, efConstruction);
             appr_alg->setEf(efSearch);
-            if (!indexFileName.empty()) {
-                std::string baseName = NormalizeIndexFilename(indexFileName);
-                std::string idxName = baseName + ".hnsw";
-                appr_alg->loadIndex(idxName.c_str(), l2space, maxElements);
-            }
+            std::string baseName = NormalizeIndexFilename(filename);
+            std::string idxName = baseName + ".hnsw";
+            appr_alg->loadIndex(idxName.c_str(), l2space, maxElements);
         }
 
         // Lookup using hnswlib.

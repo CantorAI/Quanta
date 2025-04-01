@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 #include "value.h"
-#include "quantadb.h"
+#include "QuantaDb.h"
 #include "FilePathIndex.h"
 
 namespace Quanta

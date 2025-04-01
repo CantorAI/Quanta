@@ -106,7 +106,7 @@ namespace Quanta {
         }
 
         // Extend SaveMore to store LSH state.
-        virtual void SaveMore(ofstream& ofs) const override {
+        virtual void SaveMore(ofstream& ofs, const std::string& filename) const override {
             ofs.write(reinterpret_cast<const char*>(&L), sizeof(L));
             ofs.write(reinterpret_cast<const char*>(&k), sizeof(k));
             ofs.write(reinterpret_cast<const char*>(&lsh_built), sizeof(lsh_built));
@@ -131,7 +131,7 @@ namespace Quanta {
         }
 
         // Extend LoadMore to load LSH state.
-        virtual void LoadMore(ifstream& ifs) override {
+        virtual void LoadMore(ifstream& ifs, const std::string& filename) override {
             ifs.read(reinterpret_cast<char*>(&L), sizeof(L));
             ifs.read(reinterpret_cast<char*>(&k), sizeof(k));
             ifs.read(reinterpret_cast<char*>(&lsh_built), sizeof(lsh_built));

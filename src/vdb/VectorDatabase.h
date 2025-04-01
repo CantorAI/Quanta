@@ -10,6 +10,7 @@
 #include <cmath>
 #include <algorithm>
 #include <omp.h>
+#include <string>
 
 namespace Quanta {
 
@@ -78,7 +79,7 @@ namespace Quanta {
             ofs.write(reinterpret_cast<const char*>(data.data()), sizeof(float) * dataSize);
 
             // Call virtual function to allow derived classes to save their own members.
-            SaveMore(ofs);
+            SaveMore(ofs, filename);
             ofs.close();
         }
 
@@ -105,14 +106,14 @@ namespace Quanta {
             ifs.read(reinterpret_cast<char*>(data.data()), sizeof(float) * dataSize);
 
             // Call virtual function for derived class members.
-            LoadMore(ifs);
+            LoadMore(ifs,filename);
             ifs.close();
         }
 
         // Virtual function for derived classes to save additional members.
-        virtual void SaveMore(ofstream& ofs) const {}
+        virtual void SaveMore(ofstream& ofs,const std::string& filename) const {}
         // Virtual function for derived classes to load additional members.
-        virtual void LoadMore(ifstream& ifs) {}
+        virtual void LoadMore(ifstream& ifs,const std::string& filename) {}
 
         // Pure virtual Lookup function.
         virtual vector<pair<uint64_t, float>> Lookup(const vector<float>& query, int topK) = 0;
