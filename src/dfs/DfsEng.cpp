@@ -152,7 +152,32 @@ namespace Quanta
 
     X::Value DfsEngine::Query(std::string filePattern)
     {
+#define use_idx 1
+#if use_idx
+        auto ids = m_filePathIndex.SingleMatch(filePattern);
+        X::List list;
+		for (auto id : ids)
+		{
+            list += id;
+		}
+		return list;
+#else
         // Use the database to query files based on the pattern
         return QuantaDb::I().QueryFilesByPath(filePattern);
+#endif
     }
+
+    void DfsEngine::BuildIndex(std::string indexFile)
+    {
+		QuantaDb::I().EnumFiles([this](std::string& filePath) {
+			m_filePathIndex.AddFile(filePath, false);
+			}); 
+		m_filePathIndex.Save(indexFile);
+    }
+
+    void DfsEngine::LoadIndex(std::string indexFile)
+    {
+        m_filePathIndex.Load(indexFile);
+    }
+
 }

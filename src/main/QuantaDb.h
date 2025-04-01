@@ -3,6 +3,7 @@
 #include "singleton.h"
 #include <string>
 #include "value.h"
+#include <functional>
 
 namespace Quanta
 {
@@ -26,6 +27,7 @@ namespace Quanta
         // File system scanning related methods
         bool AddFile(std::string filePath, long long fileSize, std::string nodeId, std::string metadata);
         X::Value QueryFilesByNodeId(std::string nodeId);
+        void EnumFiles(std::function<void(std::string& filePath)> cb);
         X::Value QueryFilesByPath(std::string pathPattern);
         bool RemoveFile(std::string filePath, std::string nodeId);
         bool UpdateFileMetadata(std::string filePath, std::string nodeId, std::string metadata);

@@ -5,6 +5,7 @@ from Quanta import quanta
 quanta.cantor = cantor
 dfs = quanta.dfs()
 # dfs.Scan("C:/")
+dfs.LoadIndex("d:/test101.idx")
 
 start_time = time.time()
 files = dfs.Query("D:/CantorAI/Quanta/src/main/main.cpp")

@@ -117,6 +117,19 @@ namespace Quanta
         return results;
     }
 
+    void QuantaDb::EnumFiles(std::function<void(std::string& filePath)> cb)
+    {
+        X::Value results;
+        X::Value stat = m_statment("SELECT FilePath FROM DfsFiles");
+
+        X::List fileList;
+        while (stat["step"]() == m_status_ROW)
+        {
+			std::string filePath = stat["get"](0).ToString();
+			cb(filePath);
+        }
+    }
+
     X::Value QuantaDb::QueryFilesByPath(std::string pathPattern)
     {
         X::Value results;

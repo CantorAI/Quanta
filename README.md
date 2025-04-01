@@ -26,3 +26,7 @@ Quanta is an innovative smart home system developed by CantorAI. It leverages di
    ```bash
    git clone https://github.com/yourusername/Quanta.git
    cd Quanta
+
+### hnswlib in vdb folder
+  from https://github.com/nmslib/hnswlib  
+

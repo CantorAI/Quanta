@@ -45,20 +45,22 @@ namespace Quanta
                 {
                     return ((QuantaHost*)pContextObj)->FromBytes(pStream);
                 });
-        APISET().AddClass<0, DfsEngine>("dfs");
-        APISET().AddFunc<1>("SetCantor", &QuantaHost::SetCantor);
-        APISET().AddPropL("cantor",
-            [](auto* pThis, X::Value v)
-            {
-                pThis->SetCantor(v);
-            },
-            [](auto* pThis) {return pThis->m_cantor; });
+            APISET().AddClass<0, DfsEngine>("dfs");
+            APISET().AddFunc<1>("SetCantor", &QuantaHost::SetCantor);
+            APISET().AddPropL("cantor",
+                [](auto* pThis, X::Value v)
+                {
+                    pThis->SetCantor(v);
+                },
+                [](auto* pThis) {return pThis->m_cantor; });
+            APISET().AddFunc<0>("Test", &QuantaHost::Test);
         END_PACKAGE
 
         inline long long GetContentSize()
         {
             return sizeof(m_cantor);
         }
+        void Test();
         inline X::Runtime& RT() { return *m_defaultRuntime; }
 
         QuantaHost()

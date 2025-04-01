@@ -19,12 +19,14 @@ include_directories(${xlang_sdk_folder})
 include_directories("src/include")
 include_directories("src/common")
 include_directories("src/log")
+include_directories("src/vdb")
 include_directories("src/dfs")
 include_directories("src/main")
 
 FILE(GLOB XLANG_API_SRC "${xlang_sdk_folder}/value.cpp")
 FILE(GLOB Common_SRC "src/common/*.cpp" "src/log/*.cpp")
 FILE(GLOB Dfs_SRC "src/dfs/*.cpp")
+FILE(GLOB Vdb_SRC "src/vdb/*.cpp")
 FILE(GLOB Main_SRC "src/main/*.cpp")
 
 
@@ -34,6 +36,7 @@ add_library(${PROJECT_NAME}
 	${Common_SRC}
 	${Main_SRC}
 	${Dfs_SRC}
+	${Vdb_SRC}
 )
 if (WIN32)
 else()

@@ -4,6 +4,7 @@
 #include <vector>
 #include "value.h"
 #include "quantadb.h"
+#include "FilePathIndex.h"
 
 namespace Quanta
 {
@@ -13,6 +14,7 @@ namespace Quanta
         std::string m_lastRootFolder;
         bool m_isScanning;
 
+        FilePathIndex m_filePathIndex;
         // Internal helper methods
         std::string GenerateMetadata(const std::string& filePath, long long fileSize, const std::string& lastModified);
         bool Scan(std::string rootFolder, const std::vector<std::string>& excludeFolders = {}, bool skipHidden = true);
@@ -32,13 +34,17 @@ namespace Quanta
                 {
                     return ((DfsEngine*)pContextObj)->FromBytes(pStream);
                 });
-        APISET().AddFunc<1>("Scan", &DfsEngine::ScanAPI);
-        APISET().AddFunc<1>("Query", &DfsEngine::Query);
+            APISET().AddFunc<1>("Scan", &DfsEngine::ScanAPI);
+            APISET().AddFunc<1>("Query", &DfsEngine::Query);
+            APISET().AddFunc<1>("BuildIndex", &DfsEngine::BuildIndex);
+            APISET().AddFunc<1>("LoadIndex", &DfsEngine::LoadIndex);
         END_PACKAGE
 
         DfsEngine() : m_isScanning(false) {}
         ~DfsEngine() {}
 
+        void BuildIndex(std::string indexFile);
+        void LoadIndex(std::string indexFile);
         // Main API methods
         bool ScanAPI(std::string rootFolder)
         {
