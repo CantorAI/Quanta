@@ -1,0 +1,21 @@
+# requirements.txt
+
+# Core dependencies
+numpy>=1.21.0
+sentence-transformers>=2.2.2
+transformers>=4.30.0
+torch>=2.0.0
+
+# OpenAI API client
+openai>=0.27.0
+
+# TensorFlow and TF Hub
+tensorflow>=2.12.0
+tensorflow-hub>=0.14.0
+
+# Optional: for typing and utility
+typing_extensions
+
+# If you plan to use GPU acceleration for HuggingFace models,
+# install the appropriate torch variant (e.g., with CUDA support):
+# torch>=2.0.0+cu117 -f https://download.pytorch.org/whl/torch_stable.html
