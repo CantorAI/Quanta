@@ -70,6 +70,9 @@ extern "C"  X_EXPORT void Load(void* pHost,X::Value curModule)
 	std::string strLibName;
 	GetCurLibInfo((void *)Load, strFullPath, strFolderPath, strLibName);
 	X::g_pXHost = (X::XHost*)pHost;
+	X::Module m(curModule);
+	X::XRuntime* rt = m->GetRT();
+	Quanta::QuantaHost::I().SetDefaultRuntime(rt);
 	Quanta::QuantaDb::I().Start(strFolderPath); // Start the database
 	Quanta::QuantaHost::I().SetPath(strFolderPath, strLibName);
 	X::RegisterPackage<Quanta::QuantaHost>(strLibName.c_str(), Quanta_API_Name, &Quanta::QuantaHost::I());

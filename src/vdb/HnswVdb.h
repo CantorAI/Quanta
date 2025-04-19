@@ -1,107 +1,198 @@
 #ifndef HNSW_VDB_H
 #define HNSW_VDB_H
-#include "VectorDatabase.h"
-#include "hnswlib/hnswlib.h" // Adjust the include path as needed
+
+#include "hnswlib/hnswlib.h"   // Adjust include path as needed
+#include <vector>
 #include <string>
-#include <cstdlib>
-#include <fstream>
-#include <iostream>
+#include <thread>
+#include <stdexcept>
+#include <cmath>
+#include <algorithm>
+#include <queue>
+#include <omp.h>
 
 namespace Quanta {
 
-    // Derived class implementing ANN lookup using hnswlib.
-    // This example assumes that hnswlib is integrated into your project.
-    class HnswVdb : public VectorDatabase {
+    class HnswVdb {
     public:
-        hnswlib::HierarchicalNSW<float>* appr_alg;
-        // HNSW parameters:
-        int M;              // Maximum number of neighbors.
-        int efConstruction; // Controls index construction quality.
-        int efSearch;       // Controls search quality.
-        size_t maxElements; // Capacity for the index.
-        // The base filename for saving/loading the hnsw index.
-        std::string indexFileName;
-
-        // Constructor requires capacity and other parameters.
-        HnswVdb(int dimension, size_t maxElements_, int maxM = 16, int efC = 200, int efS = 50)
-            : VectorDatabase(dimension), M(maxM), efConstruction(efC), efSearch(efS), maxElements(maxElements_)
+        /// Construct with space = "l2", "ip", or "cosine"
+        HnswVdb(const std::string& space_name,
+            int dimension,
+            size_t max_elements,
+            int M = 16,
+            int ef_construction = 200,
+            int ef_search = 50)
+            : space_name_(space_name),
+            dim_(dimension),
+            M_(M),
+            ef_construction_(ef_construction),
+            ef_search_(ef_search),
+            max_elements_(max_elements),
+            normalize_(false),
+            space_(nullptr),
+            appr_alg_(nullptr)
         {
-            // Create a space (using L2 space here)
-            hnswlib::L2Space* l2space = new hnswlib::L2Space(dimension);
-            appr_alg = new hnswlib::HierarchicalNSW<float>(l2space, maxElements, M, efConstruction);
-            appr_alg->setEf(efSearch);
+            // select metric space
+            if (space_name_ == "l2") {
+                space_ = new hnswlib::L2Space(dim_);
+            }
+            else if (space_name_ == "ip") {
+                space_ = new hnswlib::InnerProductSpace(dim_);
+            }
+            else if (space_name_ == "cosine") {
+                space_ = new hnswlib::InnerProductSpace(dim_);
+                normalize_ = true;
+            }
+            else {
+                throw std::runtime_error("Space name must be \"l2\", \"ip\", or \"cosine\".");
+            }
+
+            // build index
+            appr_alg_ = new hnswlib::HierarchicalNSW<float>(
+                space_, max_elements_, M_, ef_construction_);
+            appr_alg_->setEf(ef_search_);
+
+            num_threads_default_ = std::thread::hardware_concurrency();
         }
 
-        virtual ~HnswVdb() {
-            if (appr_alg) {
-                delete appr_alg;
-                appr_alg = nullptr;
+        ~HnswVdb() {
+            delete appr_alg_;
+            delete space_;
+        }
+
+        /// Add a batch of vectors (each of length dim_). Labels.size() == vectors.size() / dim_
+        void AddVectors(const std::vector<unsigned long long>& labels,
+			const float* vectors, unsigned long long vec_n,
+            int num_threads = -1)
+        {
+            size_t n = labels.size();
+            if (vec_n != n * static_cast<size_t>(dim_)) {
+                throw std::runtime_error(
+                    "AddVectors: expected " +
+                    std::to_string(n * dim_) +
+                    " floats, got " +
+                    std::to_string(vec_n)
+                );
+            }
+
+            // determine thread count
+            int threads = (num_threads < 1
+                ? static_cast<int>(num_threads_default_)
+                : num_threads);
+            if (n <= static_cast<size_t>(threads) * 4) {
+                threads = 1;
+            }
+
+            // worker lambda
+            auto worker = [&](size_t i) {
+                const float* ptr = vectors + i * dim_;
+                // optionally normalize each vector once
+                if (normalize_) {
+                    std::vector<float> tmp(dim_);
+                    normalize_vector(ptr, tmp.data());
+                    appr_alg_->addPoint((void*)tmp.data(),
+                        static_cast<hnswlib::labeltype>(labels[i]));
+                }
+                else {
+                    appr_alg_->addPoint((void*)ptr,
+                        static_cast<hnswlib::labeltype>(labels[i]));
+                }
+                };
+
+            if (threads == 1) {
+                for (size_t i = 0; i < n; ++i) worker(i);
+            }
+            else {
+#pragma omp parallel for num_threads(threads)
+                for (long long i = 0; i < static_cast<long long>(n); ++i) {
+                    worker(i);
+                }
             }
         }
 
-        // Override AddVector: add to base storage then add to hnswlib index.
-        virtual void AddVector(uint64_t id, const std::vector<float>& vec) override {
-            VectorDatabase::AddVector(id, vec);
-            appr_alg->addPoint(vec.data(), static_cast<size_t>(ids.size() - 1));
-        }
-
-        // We do not override Save() and Load() from the base.
-        // Instead, we override SaveMore and LoadMore.
-
-        static std::string NormalizeIndexFilename(const std::string& fname) {
-            size_t pos = fname.find_last_of('.');
-            if (pos != std::string::npos) {
-                return fname.substr(0, pos);
+        /// Query topK similar items; returns (label, similarity)
+        std::vector<std::pair<unsigned long long, float>>
+            Lookup(const std::vector<float>& query, int topK)
+        {
+            if ((int)query.size() != dim_) {
+                throw std::runtime_error("Lookup: query size mismatch.");
             }
-            return fname;
-        }
 
-        virtual void SaveMore(std::ofstream& ofs, const std::string& filename) const override {
-            // Write extra HNSW parameters.
-            ofs.write(reinterpret_cast<const char*>(&maxElements), sizeof(maxElements));
-            ofs.write(reinterpret_cast<const char*>(&M), sizeof(M));
-            ofs.write(reinterpret_cast<const char*>(&efConstruction), sizeof(efConstruction));
-            ofs.write(reinterpret_cast<const char*>(&efSearch), sizeof(efSearch));
-
-            std::string baseName = NormalizeIndexFilename(filename);
-            std::string idxName = baseName + ".hnsw";
-            appr_alg->saveIndex(idxName.c_str());
-        }
-
-        virtual void LoadMore(std::ifstream& ifs, const std::string& filename) override {
-            ifs.read(reinterpret_cast<char*>(&maxElements), sizeof(maxElements));
-            ifs.read(reinterpret_cast<char*>(&M), sizeof(M));
-            ifs.read(reinterpret_cast<char*>(&efConstruction), sizeof(efConstruction));
-            ifs.read(reinterpret_cast<char*>(&efSearch), sizeof(efSearch));
-
-            // Re-create the hnswlib index using the loaded parameters.
-            hnswlib::L2Space* l2space = new hnswlib::L2Space(D);
-            if (appr_alg) {
-                delete appr_alg;
+            // optionally normalize query
+            std::vector<float> qbuf;
+            const float* qptr = query.data();
+            if (normalize_) {
+                qbuf.resize(dim_);
+                normalize_vector(qptr, qbuf.data());
+                qptr = qbuf.data();
             }
-            appr_alg = new hnswlib::HierarchicalNSW<float>(l2space, maxElements, M, efConstruction);
-            appr_alg->setEf(efSearch);
-            std::string baseName = NormalizeIndexFilename(filename);
-            std::string idxName = baseName + ".hnsw";
-            appr_alg->loadIndex(idxName.c_str(), l2space, maxElements);
-        }
 
-        // Lookup using hnswlib.
-        virtual std::vector<std::pair<uint64_t, float>> Lookup(const std::vector<float>& query, int topK) override {
-            std::priority_queue<std::pair<float, hnswlib::labeltype>> result =
-                appr_alg->searchKnn(query.data(), static_cast<size_t>(topK));
-            std::vector<std::pair<uint64_t, float>> output;
+            // search
+            auto result = appr_alg_->searchKnn(qptr, static_cast<size_t>(topK));
+
+            // collect and convert to (label, similarity)
+            std::vector<std::pair<unsigned long long, float>> out;
             while (!result.empty()) {
-                auto elem = result.top();
+                auto& p = result.top();
+                // distance -> similarity
+                float sim = 1.0f / (1.0f + p.first);
+                out.emplace_back(
+                    static_cast<unsigned long long>(p.second),
+                    sim
+                );
                 result.pop();
-                // Convert distance to similarity (e.g., similarity = 1/(1+distance)).
-                output.push_back({ ids[elem.second], 1.0f / (1.0f + elem.first) });
             }
-            std::sort(output.begin(), output.end(),
-                [](const std::pair<uint64_t, float>& a, const std::pair<uint64_t, float>& b) {
-                    return a.second > b.second;
-                });
-            return output;
+            // reverse so highest sim first
+            std::reverse(out.begin(), out.end());
+            return out;
+        }
+
+        /// Persist index to disk (appends .hnsw)
+        void Save(const std::string& filename) {
+            std::string base = NormalizeFilename(filename);
+            appr_alg_->saveIndex((base + ".hnsw").c_str());
+        }
+
+        /// Load index from disk (expects .hnsw)
+        void Load(const std::string& filename) {
+            std::string base = NormalizeFilename(filename);
+            // rebuild new index object
+            delete appr_alg_;
+            appr_alg_ = new hnswlib::HierarchicalNSW<float>(
+                space_, max_elements_, M_, ef_construction_);
+            appr_alg_->setEf(ef_search_);
+            appr_alg_->loadIndex((base + ".hnsw").c_str(),
+                space_,
+                max_elements_);
+        }
+
+    private:
+        std::string space_name_;
+        int         dim_;
+        int         M_;
+        int         ef_construction_;
+        int         ef_search_;
+        size_t      max_elements_;
+        bool        normalize_;
+        size_t      num_threads_default_;
+
+        hnswlib::SpaceInterface<float>* space_;
+        hnswlib::HierarchicalNSW<float>* appr_alg_;
+
+        static std::string NormalizeFilename(const std::string& f) {
+            auto pos = f.find_last_of('.');
+            return (pos == std::string::npos ? f : f.substr(0, pos));
+        }
+
+        static void normalize_vector(const float* data, float* out) {
+            float norm = 0.0f;
+            for (int i = 0; i < (int)std::distance(data, data + 1); ++i) {
+                norm += data[i] * data[i];
+            }
+            norm = 1.0f / (std::sqrt(norm) + 1e-30f);
+            for (int i = 0; i < (int)std::distance(data, data + 1); ++i) {
+                out[i] = data[i] * norm;
+            }
         }
     };
 

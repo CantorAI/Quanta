@@ -16,7 +16,7 @@ namespace Quanta
     class QuantaHost :
         public Singleton<QuantaHost>
     {
-        X::Runtime* m_defaultRuntime = nullptr;
+        X::XRuntime* m_defaultRuntime = nullptr;
         std::string m_strQuantaPath;
         std::string m_strLibName;
         X::Value m_cantor;
@@ -47,7 +47,7 @@ namespace Quanta
                     return ((QuantaHost*)pContextObj)->FromBytes(pStream);
                 });
             APISET().AddClass<0, DfsEngine>("dfs");
-            APISET().AddClass<2, Vdb>("vdb");
+            APISET().AddVarClass<Vdb>("vdb");
             APISET().AddFunc<1>("SetCantor", &QuantaHost::SetCantor);
             APISET().AddPropL("cantor",
                 [](auto* pThis, X::Value v)
@@ -63,18 +63,17 @@ namespace Quanta
             return sizeof(m_cantor);
         }
         void Test();
-        inline X::Runtime& RT() { return *m_defaultRuntime; }
+        inline X::XRuntime* RT() { return m_defaultRuntime; }
 
+		inline void SetDefaultRuntime(X::XRuntime* rt)
+		{
+			m_defaultRuntime = rt;
+		}
         QuantaHost()
         {
-            m_defaultRuntime = new X::Runtime();
         }
 		~QuantaHost()
 		{
-            if (m_defaultRuntime)
-            {
-                delete m_defaultRuntime;
-            }
 		}
         inline void SetPath(std::string& path, std::string& libName)
         {

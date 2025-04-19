@@ -14,7 +14,8 @@ namespace Quanta
             _mkdir(dbFolder.c_str());
         }
         std::string dbName = dbFolder + Path_Sep_S + "quantastore.db";
-        X::Package sqlite(QuantaHost::I().RT(), "sqlite", "xlang_sqlite");
+        X::Runtime rt(QuantaHost::I().RT());
+        X::Package sqlite(rt, "sqlite", "xlang_sqlite");
         m_db = sqlite["Database"](dbName);
         m_statment = m_db["statement"];
         m_sqlite = sqlite;

@@ -4,23 +4,29 @@
 namespace Quanta
 {
 	class HnswVdb;
+	class VectorDatabase;
 	class Vdb
 	{
-		HnswVdb* m_vdb = nullptr;
+		VectorDatabase* m_vdb = nullptr;
+		HnswVdb* m_index = nullptr;
 	public:
 		BEGIN_PACKAGE(Vdb)
+			APISET().AddVarFunc("Init", &Vdb::Init);
 			APISET().AddFunc<1>("Save", &Vdb::Save);
 			APISET().AddFunc<1>("Load", &Vdb::Load);
-			APISET().AddFunc<2>("AddVector", &Vdb::AddVector);
+			APISET().AddVarFunc("AddVectors", &Vdb::AddVectors);
 			APISET().AddFunc<2>("Lookup", &Vdb::Lookup);
 		END_PACKAGE
 
 	public:
-		Vdb(int dimension, long long maxElements);
+		Vdb(X::ARGS& params, X::KWARGS& kwParams);
+		bool Init(X::XRuntime* rt, X::XObj* pContext,
+			X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
 		virtual ~Vdb();
 		bool Save(const std::string& fileName);
 		bool Load(const std::string& fileName);
 		X::Value Lookup(X::Value& vec, int topK);
-		void AddVector(unsigned long long id, X::Value& vec);
+		void AddVectors(X::XRuntime* rt, X::XObj* pContext,
+			X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
 	};
 }

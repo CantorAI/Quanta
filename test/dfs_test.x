@@ -2,6 +2,7 @@ import time
 import cantor thru 'lrpc:1000'
 from Quanta import quanta
 
+print("Init")
 quanta.cantor = cantor
 dfs = quanta.dfs()
 # dfs.Scan("C:/")

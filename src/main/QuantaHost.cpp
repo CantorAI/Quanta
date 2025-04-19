@@ -5,6 +5,6 @@ namespace Quanta
 {
     void QuantaHost::Test()
     {
-        vdb_test();
+        //vdb_test();
     }
 }
