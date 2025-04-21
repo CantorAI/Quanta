@@ -143,7 +143,13 @@ class EmbeddingAPI:
       use:
         'use': default TF Hub USE
     """
-    def __init__(self, default_device: str = 'cpu'):
+    def __init__(self, default_device: str = None):
+        if default_device is None:
+                try:
+                    import torch
+                    default_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+                except ImportError:
+                    default_device = 'cpu'
         self._registry: Dict[str, Dict[str, Any]] = {}
         self._models: Dict[str, BaseEmbedder] = {}
         self._active: Optional[str] = None
@@ -217,13 +223,7 @@ class EmbeddingAPI:
 
 
 if __name__ == '__main__':
-    try:
-        import torch
-        default_dev = 'cuda' if torch.cuda.is_available() else 'cpu'
-    except ImportError:
-        default_dev = 'cpu'
-
-    api = EmbeddingAPI(default_device=default_dev)
+    api = EmbeddingAPI()
     print("Available models:", api.list_models())
 
     api.set_active_model('mpnet')

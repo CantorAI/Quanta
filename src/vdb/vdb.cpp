@@ -136,9 +136,10 @@ namespace Quanta
 			for (const auto& result : results)
 			{
 				X::List item;
-				item += m_vdb->GetIdByIndex(result.first);
+				unsigned long long id = m_vdb->GetIdByIndex(result.first);
+				item += id;
 				item += result.second;
-				item += m_vdb->GetTextById(result.first);
+				item += m_vdb->GetTextById(id);
 				list->AddItem(item);
 			}
 			return list;
@@ -174,7 +175,7 @@ namespace Quanta
 		X::Tensor vecT(vecVal);
 		long long totalCount = vecT->GetCount();
 		int D = m_vdb->GetDimension();          // your VectorDatabase dim
-		if (D <= 0 || totalCount % D != 0) {
+		if (totalCount ==0 || D <= 0 || totalCount % D != 0) {
 			retValue = X::Value(false);
 			return;
 		}
@@ -212,8 +213,22 @@ namespace Quanta
 			X::List list(chunksVal);
 			if (list->Size() == n) {
 				for (auto& it : *list)
-					chunkTexts.push_back(it.ToString());
+				{
+					if (it.IsDict())
+					{
+						X::Value text = it["chunk"];
+						chunkTexts.push_back(text.ToString());
+					}
+					else
+					{
+						chunkTexts.push_back(it.ToString());
+					}
+				}
 			}
+		}
+		else if (chunksVal.IsDict()) {
+			X::Value text = chunksVal["chunk"];
+			chunkTexts.assign(n, text.ToString());
 		}
 		else if (chunksVal.IsString()) {
 			chunkTexts.assign(n, chunksVal.ToString());
@@ -231,7 +246,8 @@ namespace Quanta
 		// --- 6) insert into HNSW with the rawPtr (no copy) ---
 		m_index->AddVectors(recIdx, rawPtr, totalCount, num_threads);
 
-		retValue = X::Value(true);
+		unsigned long long last = extIds[n-1];
+		retValue = X::Value(last);
 	}
 
 
