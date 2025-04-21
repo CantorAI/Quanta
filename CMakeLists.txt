@@ -29,6 +29,12 @@ FILE(GLOB Dfs_SRC "src/dfs/*.cpp")
 FILE(GLOB Vdb_SRC "src/vdb/*.cpp")
 FILE(GLOB Main_SRC "src/main/*.cpp")
 
+file(GLOB SCRIPTS_FILES
+    "${PROJECT_SOURCE_DIR}/scripts/*.py"
+    "${PROJECT_SOURCE_DIR}/scripts/requirements.txt"
+)
+file(COPY ${SCRIPTS_FILES} DESTINATION "${CMAKE_BINARY_DIR}/bin/Applications/quanta")
+
 
 add_library(${PROJECT_NAME} 
 	SHARED
