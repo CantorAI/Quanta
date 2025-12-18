@@ -134,8 +134,16 @@ namespace Quanta {
             std::vector<std::pair<unsigned long long, float>> out;
             while (!result.empty()) {
                 auto& p = result.top();
+                float dist = p.first;
+                float sim;
                 // distance -> similarity
-                float sim = 1.0f / (1.0f + p.first);
+                if (std::isnan(dist) || std::isinf(dist) || dist < 0.0f) {
+                    sim = 0.0f;  // treat invalid distances as zero similarity
+                    // optionally log warning here
+                }
+                else {
+                    sim = 1.0f / (1.0f + dist);
+                }
                 out.emplace_back(
                     static_cast<unsigned long long>(p.second),
                     sim

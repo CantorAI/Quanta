@@ -16,7 +16,6 @@
 #endif
 
 #include "QuantaHost.h"
-#include "QuantaDb.h"
 
 static bool GetCurLibInfo(void* EntryFuncName, std::string& strFullPath,
 	std::string& strFolderPath, std::string& strLibName)
@@ -73,7 +72,6 @@ extern "C"  X_EXPORT void Load(void* pHost,X::Value curModule)
 	X::Module m(curModule);
 	X::XRuntime* rt = m->GetRT();
 	Quanta::QuantaHost::I().SetDefaultRuntime(rt);
-	Quanta::QuantaDb::I().Start(strFolderPath); // Start the database
 	Quanta::QuantaHost::I().SetPath(strFolderPath, strLibName);
 	X::RegisterPackage<Quanta::QuantaHost>(strLibName.c_str(), Quanta_API_Name, &Quanta::QuantaHost::I());
 }
