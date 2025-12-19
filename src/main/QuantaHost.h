@@ -10,6 +10,7 @@
 #include "DfsEng.h"
 #include "log.h"
 #include "vdb.h"
+#include "partitioned_vdb.h"
 
 namespace Quanta
 {
@@ -48,6 +49,7 @@ namespace Quanta
                 });
             APISET().AddClass<0, DfsEngine>("dfs");
             APISET().AddVarClass<Vdb>("vdb");
+            APISET().AddVarClass<PartitionedVdb>("partitioned_vdb");
             APISET().AddFunc<1>("SetCantor", &QuantaHost::SetCantor);
             APISET().AddPropL("cantor",
                 [](auto* pThis, X::Value v)
