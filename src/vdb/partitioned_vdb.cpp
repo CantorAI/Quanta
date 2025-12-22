@@ -626,7 +626,9 @@ namespace Quanta
             return;
         }
 
-        X::Tensor vecT(vecVal);
+        X::Tensor vecT0(vecVal);
+		X::Value vecValCont = vecT0->ToType(X::TensorDataType::FLOAT);
+		X::Tensor vecT(vecValCont);
         long long totalCount = vecT->GetCount();
 
         if (totalCount == 0 || dimension_ <= 0 || totalCount % dimension_ != 0) {
@@ -705,7 +707,9 @@ namespace Quanta
             return;
         }
 
-        X::Tensor vecT(vecVal);
+        X::Tensor vecT0(vecVal);
+        X::Value vecValCont = vecT0->ToType(X::TensorDataType::FLOAT);
+        X::Tensor vecT(vecValCont);
         std::vector<float> query(vecT->GetCount());
         memcpy(query.data(), vecT->GetData(), vecT->GetCount() * sizeof(float));
 
@@ -836,14 +840,14 @@ namespace Quanta
 
         for (const auto& key : allKeys) {
             X::Dict info;
-            info["key"] = key;
+            info->Set("key", key);
 
             size_t pos = key.rfind('_');
             std::string tsPartition = key.substr(0, pos);
             int customIndex = std::stoi(key.substr(pos + 1));
 
-            info["ts_partition"] = tsPartition;
-            info["custom_index"] = customIndex;
+            info->Set("ts_partition", tsPartition);
+            info->Set("custom_index", customIndex);
 
             X::List tags;
             if (customPartitionTags_.count(customIndex)) {
@@ -851,12 +855,12 @@ namespace Quanta
                     tags += tag;
                 }
             }
-            info["tags"] = tags;
+            info->Set("tags", tags);
 
             bool loaded = partitions_.count(key) > 0;
-            info["loaded"] = loaded;
+            info->Set("loaded", loaded);
             if (loaded) {
-                info["count"] = static_cast<long long>(partitions_[key]->count);
+                info->Set("count", static_cast<long long>(partitions_[key]->count));
             }
 
             result->AddItem(info);

@@ -128,7 +128,10 @@ namespace Quanta
 	{
 		if (m_vdb && vec.IsTensor())
 		{
-			X::Tensor vecTensor(vec);
+			X::Tensor vecT0(vec);
+			X::Value vecValCont = vecT0->ToType(X::TensorDataType::FLOAT);
+			X::Tensor vecTensor(vecValCont);
+
 			std::vector<float> vecData(vecTensor->GetCount());
 			memcpy(vecData.data(), vecTensor->GetData(), vecTensor->GetCount() * sizeof(float));
 			auto results = m_index->Lookup(vecData, topK);
@@ -172,7 +175,10 @@ namespace Quanta
 			retValue = X::Value(false);
 			return;
 		}
-		X::Tensor vecT(vecVal);
+		X::Tensor vecT0(vecVal);
+		X::Value vecValCont = vecT0->ToType(X::TensorDataType::FLOAT);
+		X::Tensor vecT(vecValCont);
+
 		long long totalCount = vecT->GetCount();
 		int D = m_vdb->GetDimension();          // your VectorDatabase dim
 		if (totalCount ==0 || D <= 0 || totalCount % D != 0) {
