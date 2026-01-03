@@ -2,6 +2,7 @@
 #include "xpackage.h"
 #include <map>
 #include <set>
+#include <numeric>
 #include <memory>
 #include <filesystem>
 
@@ -56,6 +57,7 @@ namespace Quanta
         APISET().AddVarFunc("Lookup", &PartitionedVdb::Lookup);
         APISET().AddFunc<2>("AddPartitionTag", &PartitionedVdb::AddPartitionTag);
         APISET().AddFunc<0>("ListPartitions", &PartitionedVdb::ListPartitions);
+        APISET().AddVarFunc("QueryLabelByID", &PartitionedVdb::QueryLabelByID);
         APISET().AddFunc<1>("GetPartitionInfo", &PartitionedVdb::GetPartitionInfo);
         END_PACKAGE
 
@@ -70,7 +72,8 @@ namespace Quanta
 
         void AddVectors(X::XRuntime* rt, X::XObj* pContext,
             X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
-
+        bool QueryLabelByID(X::XRuntime* rt, X::XObj* pContext,
+            X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
         void Lookup(X::XRuntime* rt, X::XObj* pContext,
             X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
 

@@ -8,6 +8,79 @@
 namespace Quanta
 {
 
+    // Helper: cosine similarity between two vectors.
+    float quanta_cosine_similarity(int dimension, const float* a, const float* b)
+    {
+        float dot = 0.0f, normA = 0.0f, normB = 0.0f;
+        for (int i = 0; i < dimension; ++i) {
+            dot += a[i] * b[i];
+            normA += a[i] * a[i];
+            normB += b[i] * b[i];
+        }
+        if (normA == 0.0f || normB == 0.0f) return 0.0f;
+        return dot / (std::sqrt(normA) * std::sqrt(normB));
+    }
+
+    // Dedup results within a partition using parallel processing
+    // Returns indices to keep (sorted by score descending)
+    std::vector<size_t> dedup_results(
+        const std::vector<std::pair<unsigned long long, float>>& results,
+        const std::vector<std::vector<float>>& vectors,
+        int dimension,
+        float threshold)
+    {
+        size_t n = results.size();
+        if (n <= 1) {
+            std::vector<size_t> indices(n);
+            std::iota(indices.begin(), indices.end(), 0);
+            return indices;
+        }
+
+        // Create sorted indices by score (descending)
+        std::vector<size_t> sortedIdx(n);
+        std::iota(sortedIdx.begin(), sortedIdx.end(), 0);
+        std::sort(sortedIdx.begin(), sortedIdx.end(),
+            [&results](size_t a, size_t b) {
+                return results[a].second > results[b].second;
+            });
+
+        // Mark removed items
+        std::vector<bool> removed(n, false);
+
+        // Compare each item against higher-scored items
+#pragma omp parallel for schedule(dynamic)
+        for (long long ii = 1; ii < static_cast<long long>(n); ++ii) {
+            size_t i = sortedIdx[ii];
+            if (removed[i] || vectors[i].empty()) continue;
+
+            const float* vec_i = vectors[i].data();
+
+            for (long long jj = 0; jj < ii; ++jj) {
+                size_t j = sortedIdx[jj];
+                if (removed[j] || vectors[j].empty()) continue;
+
+                const float* vec_j = vectors[j].data();
+                float sim = quanta_cosine_similarity(dimension, vec_i, vec_j);
+
+                if (sim >= threshold) {
+                    removed[i] = true;
+                    break;
+                }
+            }
+        }
+
+        // Collect kept indices (in sorted order)
+        std::vector<size_t> kept;
+        kept.reserve(n);
+        for (size_t idx : sortedIdx) {
+            if (!removed[idx]) {
+                kept.push_back(idx);
+            }
+        }
+        return kept;
+    }
+
+
     // ============================================================================
     // Constructor / Destructor
     // ============================================================================
@@ -687,6 +760,130 @@ namespace Quanta
         retValue = X::Value(static_cast<long long>(extIds[n - 1]));
     }
 
+    bool PartitionedVdb::QueryLabelByID(X::XRuntime* rt, X::XObj* pContext,
+        X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
+    {
+        if (params.size() < 1)
+        {
+            return false;
+        }
+        unsigned long long id = (unsigned long long)params[0];
+
+        // Check if timestamp and/or partition are specified
+        bool hasTimestamp = false;
+        bool hasPartition = false;
+        long long timestampMs = 0;
+        std::string partitionTag;
+
+        if (auto it = kwParams.find("timestamp"); it) {
+            timestampMs = it->val.ToLongLong();
+            hasTimestamp = true;
+        }
+        if (auto it = kwParams.find("partition"); it) {
+            partitionTag = it->val.ToString();
+            hasPartition = true;
+        }
+
+        // If both timestamp and partition are specified, search only that specific partition
+        if (hasTimestamp && hasPartition) {
+            std::string tsPartition = TimestampToPartitionName(timestampMs);
+            int customIndex = GetCustomIndex(partitionTag);
+            if (customIndex < 0) {
+                retValue = X::Value();
+                return false;
+            }
+
+            std::string key = tsPartition + "_" + std::to_string(customIndex);
+            Partition* partition = partitions_.count(key) ?
+                partitions_[key].get() : LoadPartition(key);
+
+            if (partition) {
+                std::string label = partition->vdb->GetTextById(id);
+                if (!label.empty()) {
+                    retValue = label;
+                    return true;
+                }
+            }
+            retValue = X::Value();
+            return false;
+        }
+
+        // If only partition is specified, search all time partitions for that custom index
+        if (hasPartition && !hasTimestamp) {
+            int customIndex = GetCustomIndex(partitionTag);
+            if (customIndex < 0) {
+                retValue = X::Value();
+                return false;
+            }
+
+            std::set<int> indices = { customIndex };
+            std::vector<std::string> matchingKeys = ScanMatchingPartitions(0, LLONG_MAX, indices);
+
+            for (const auto& key : matchingKeys) {
+                Partition* partition = partitions_.count(key) ?
+                    partitions_[key].get() : LoadPartition(key);
+
+                if (partition) {
+                    std::string label = partition->vdb->GetTextById(id);
+                    if (!label.empty()) {
+                        retValue = label;
+                        return true;
+                    }
+                }
+            }
+            retValue = X::Value();
+            return false;
+        }
+
+        // If only timestamp is specified, search all custom indices for that time partition
+        if (hasTimestamp && !hasPartition) {
+            std::string tsPartition = TimestampToPartitionName(timestampMs);
+
+            // Search all custom indices for this time partition
+            std::set<int> emptySet;  // Empty set means all indices
+            std::vector<std::string> matchingKeys = ScanMatchingPartitions(timestampMs, timestampMs, emptySet);
+
+            for (const auto& key : matchingKeys) {
+                // Only check keys that match our time partition
+                size_t pos = key.rfind('_');
+                if (pos != std::string::npos && key.substr(0, pos) == tsPartition) {
+                    Partition* partition = partitions_.count(key) ?
+                        partitions_[key].get() : LoadPartition(key);
+
+                    if (partition) {
+                        std::string label = partition->vdb->GetTextById(id);
+                        if (!label.empty()) {
+                            retValue = label;
+                            return true;
+                        }
+                    }
+                }
+            }
+            retValue = X::Value();
+            return false;
+        }
+
+        // Neither timestamp nor partition specified - search ALL partitions
+        std::set<int> emptySet;  // Empty set means all indices
+        std::vector<std::string> allKeys = ScanMatchingPartitions(0, LLONG_MAX, emptySet);
+
+        for (const auto& key : allKeys) {
+            Partition* partition = partitions_.count(key) ?
+                partitions_[key].get() : LoadPartition(key);
+
+            if (partition) {
+                std::string label = partition->vdb->GetTextById(id);
+                if (!label.empty()) {
+                    retValue = label;
+                    return true;
+                }
+            }
+        }
+
+        retValue = X::Value();
+        return false;
+    }
+
     // ============================================================================
     // Public API: Lookup
     // ============================================================================
@@ -712,6 +909,12 @@ namespace Quanta
         X::Tensor vecT(vecValCont);
         std::vector<float> query(vecT->GetCount());
         memcpy(query.data(), vecT->GetData(), vecT->GetCount() * sizeof(float));
+
+        // Parse dedup threshold
+        float dedupThreshold = -1.0f;
+        if (auto it = kwParams.find("dedup"); it) {
+            dedupThreshold = static_cast<float>(it->val.ToDouble());
+        }
 
         // Parse time range filters (milliseconds)
         long long tsStartMs = 0;
@@ -765,10 +968,34 @@ namespace Quanta
 
             auto results = partition->index->Lookup(query, topK);
 
-            for (const auto& [internalIdx, score] : results) {
-                unsigned long long extId = partition->vdb->GetIdByIndex(internalIdx);
-                std::string text = partition->vdb->GetTextById(extId);
-                allResults.emplace_back(extId, score, text, key);
+            // Dedup within this partition if enabled
+            if (dedupThreshold > 0.0f && results.size() > 1) {
+                // Fetch vectors for all results in parallel
+                std::vector<std::vector<float>> vectors(results.size());
+
+#pragma omp parallel for
+                for (long long i = 0; i < static_cast<long long>(results.size()); ++i) {
+                    vectors[i] = partition->index->GetVectorById(results[i].first);
+                }
+
+                // Get deduplicated indices
+                std::vector<size_t> keptIndices = dedup_results(
+                    results, vectors, dimension_, dedupThreshold);
+
+                // Add only kept results
+                for (size_t idx : keptIndices) {
+                    unsigned long long extId = partition->vdb->GetIdByIndex(results[idx].first);
+                    std::string text = partition->vdb->GetTextById(extId);
+                    allResults.emplace_back(extId, results[idx].second, text, key);
+                }
+            }
+            else {
+                // No dedup - add all results
+                for (const auto& [internalIdx, score] : results) {
+                    unsigned long long extId = partition->vdb->GetIdByIndex(internalIdx);
+                    std::string text = partition->vdb->GetTextById(extId);
+                    allResults.emplace_back(extId, score, text, key);
+                }
             }
         }
 
@@ -782,11 +1009,12 @@ namespace Quanta
         X::List resultList;
         size_t count = std::min(static_cast<size_t>(topK), allResults.size());
         for (size_t i = 0; i < count; ++i) {
+            auto& r = allResults[i];
             X::List item;
-            item += static_cast<long long>(std::get<0>(allResults[i]));
-            item += std::get<1>(allResults[i]);
-            item += std::get<2>(allResults[i]);
-            item += std::get<3>(allResults[i]);
+            item += static_cast<long long>(std::get<0>(r));
+            item += std::get<1>(r);
+            item += std::get<2>(r);
+            item += std::get<3>(r);
             resultList->AddItem(item);
         }
 

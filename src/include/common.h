@@ -1,6 +1,5 @@
 #pragma once
 
-
 namespace Quanta {
 
 	class UID
@@ -48,5 +47,4 @@ namespace Quanta {
 			return (h != r.h || l != r.l);
 		}
 	};
-
 }

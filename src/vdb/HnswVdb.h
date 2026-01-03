@@ -59,6 +59,16 @@ namespace Quanta {
             delete appr_alg_;
             delete space_;
         }
+        /// Get vector by label/ID - returns empty vector if not found
+        std::vector<float> GetVectorById(unsigned long long label) const {
+            try {
+                return appr_alg_->getDataByLabel<float>(
+                    static_cast<hnswlib::labeltype>(label));
+            }
+            catch (...) {
+                return std::vector<float>();
+            }
+        }
 
         /// Add a batch of vectors (each of length dim_). Labels.size() == vectors.size() / dim_
         void AddVectors(const std::vector<unsigned long long>& labels,
