@@ -58,6 +58,7 @@ namespace Quanta
         APISET().AddFunc<2>("AddPartitionTag", &PartitionedVdb::AddPartitionTag);
         APISET().AddFunc<0>("ListPartitions", &PartitionedVdb::ListPartitions);
         APISET().AddVarFunc("QueryLabelByID", &PartitionedVdb::QueryLabelByID);
+        APISET().AddVarFunc("Grouping", &PartitionedVdb::Grouping);
         APISET().AddFunc<1>("GetPartitionInfo", &PartitionedVdb::GetPartitionInfo);
         END_PACKAGE
 
@@ -76,7 +77,8 @@ namespace Quanta
             X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
         void Lookup(X::XRuntime* rt, X::XObj* pContext,
             X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
-
+        void Grouping(X::XRuntime* rt, X::XObj* pContext,
+            X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
         bool AddPartitionTag(int index, const std::string& tag);
         X::Value ListPartitions();
         X::Value GetPartitionInfo(const std::string& tag);

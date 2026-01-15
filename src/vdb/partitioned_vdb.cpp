@@ -2,6 +2,7 @@
 #include <ctime>
 #include <algorithm>
 #include <climits>
+#include <functional>
 #include "HnswVdb.h"
 #include "VectorDatabase.h"
 
@@ -93,10 +94,10 @@ namespace Quanta
             Init(nullptr, nullptr, params, kwParams, retValue);
         }
 
-		X::Runtime rt;
-		m_rt = rt;
+        X::Runtime rt;
+        m_rt = rt;
         X::Package sqlite(rt, "sqlite", "xlang_sqlite");
-		m_sqlite = sqlite;
+        m_sqlite = sqlite;
 
         // Initialize default partition (index 0)
         customPartitionTags_[0].insert("default");
@@ -157,7 +158,7 @@ namespace Quanta
     {
         std::string dbPath = GetDbPath().string();
         X::Value db = m_sqlite["Database"](dbPath);
-		m_configDb = db;
+        m_configDb = db;
         auto execSQL = db["exec"];
         auto statement = db["statement"];
         X::Value statusROW = m_sqlite["ROW"];
@@ -700,8 +701,8 @@ namespace Quanta
         }
 
         X::Tensor vecT0(vecVal);
-		X::Value vecValCont = vecT0->ToType(X::TensorDataType::FLOAT);
-		X::Tensor vecT(vecValCont);
+        X::Value vecValCont = vecT0->ToType(X::TensorDataType::FLOAT);
+        X::Tensor vecT(vecValCont);
         long long totalCount = vecT->GetCount();
 
         if (totalCount == 0 || dimension_ <= 0 || totalCount % dimension_ != 0) {
@@ -1019,6 +1020,206 @@ namespace Quanta
         }
 
         retValue = resultList;
+    }
+
+    void PartitionedVdb::Grouping(X::XRuntime* rt,
+        X::XObj* pContext, X::ARGS& params,
+        X::KWARGS& kwParams, X::Value& retValue)
+    {
+        // Parse kwParams for key names
+        std::string idKey = "image_id";
+        std::string partitionKey = "device_id";      // partition tag key (for SQL)
+        std::string timestampKey = "timestamp";
+        std::string fullPartitionKey = "";           // full partition key like "2024-01_0" (for Seek)
+
+        if (auto it = kwParams.find("id_key"); it) {
+            idKey = it->val.ToString();
+        }
+        if (auto it = kwParams.find("partition_key"); it) {
+            partitionKey = it->val.ToString();
+        }
+        if (auto it = kwParams.find("timestamp_key"); it) {
+            timestampKey = it->val.ToString();
+        }
+        if (auto it = kwParams.find("full_partition_key"); it) {
+            fullPartitionKey = it->val.ToString();
+        }
+
+        // Last param is threshold, all others are dict lists
+        if (params.size() < 2) {
+            retValue = X::List();
+            return;
+        }
+
+        float threshold = (float)params[params.size() - 1];
+
+        // Collect all items from all sources with their vectors
+        // Structure: (id, source_indices, vector)
+        struct ItemInfo {
+            unsigned long long id;
+            std::set<int> sources;  // which param indices this ID came from
+            std::vector<float> vector;
+        };
+
+        std::map<unsigned long long, ItemInfo> allItems;  // id -> info
+
+        // Process each dict list (source)
+        for (size_t srcIdx = 0; srcIdx < params.size() - 1; ++srcIdx) {
+            X::Value paramVal = params[srcIdx];
+            if (!paramVal.IsList()) continue;
+
+            X::List dictList(paramVal);
+            for (auto& item : *dictList) {
+                if (!item.IsDict()) continue;
+
+                X::Dict dict(item);
+
+                // Get ID
+                X::Value idVal = dict->Get(idKey);
+                if (!idVal.IsValid()) continue;
+                unsigned long long id = static_cast<unsigned long long>(idVal.ToLongLong());
+
+                // Get partition info to locate vector
+                std::string fullKey;
+
+                // Try full_partition_key first (for Seek results)
+                if (!fullPartitionKey.empty()) {
+                    X::Value fpkVal = dict->Get(fullPartitionKey);
+                    if (fpkVal.IsValid()) {
+                        fullKey = fpkVal.ToString();
+                    }
+                }
+
+                // If no full key, construct from timestamp and partition tag
+                if (fullKey.empty()) {
+                    long long timestampMs = 0;
+                    X::Value tsVal = dict->Get(timestampKey);
+                    if (tsVal.IsValid()) {
+                        timestampMs = tsVal.ToLongLong();
+                    }
+
+                    std::string partitionTag = "default";
+                    X::Value ptVal = dict->Get(partitionKey);
+                    if (ptVal.IsValid()) {
+                        partitionTag = ptVal.ToString();
+                    }
+
+                    std::string tsPartition = TimestampToPartitionName(timestampMs);
+                    int customIndex = GetCustomIndex(partitionTag);
+                    if (customIndex < 0) customIndex = 0;
+
+                    fullKey = tsPartition + "_" + std::to_string(customIndex);
+                }
+
+                // Add source index to this ID
+                auto& info = allItems[id];
+                info.id = id;
+                info.sources.insert(static_cast<int>(srcIdx));
+
+                // Fetch vector if not already fetched
+                if (info.vector.empty()) {
+                    Partition* partition = partitions_.count(fullKey) ?
+                        partitions_[fullKey].get() : LoadPartition(fullKey);
+
+                    if (partition && partition->vdb) {
+                        info.vector = partition->index->GetVectorById(id);
+                    }
+                }
+            }
+        }
+        // Convert to vector for processing
+        std::vector<ItemInfo*> items;
+        items.reserve(allItems.size());
+        for (auto& [id, info] : allItems) {
+            if (!info.vector.empty()) {
+                items.push_back(&info);
+            }
+        }
+
+        if (items.empty()) {
+            retValue = X::List();
+            return;
+        }
+
+        // Union-Find for grouping
+        std::vector<size_t> parent(items.size());
+        std::iota(parent.begin(), parent.end(), 0);
+
+        std::function<size_t(size_t)> find = [&](size_t x) -> size_t {
+            if (parent[x] != x) {
+                parent[x] = find(parent[x]);
+            }
+            return parent[x];
+            };
+
+        auto unite = [&](size_t x, size_t y) {
+            size_t px = find(x);
+            size_t py = find(y);
+            if (px != py) {
+                parent[px] = py;
+            }
+            };
+
+        // Compare all pairs and group similar ones
+        size_t n = items.size();
+#pragma omp parallel for schedule(dynamic)
+        for (long long i = 0; i < static_cast<long long>(n); ++i) {
+            for (size_t j = i + 1; j < n; ++j) {
+                float sim = quanta_cosine_similarity(
+                    dimension_,
+                    items[i]->vector.data(),
+                    items[j]->vector.data()
+                );
+
+                if (sim >= threshold) {
+#pragma omp critical
+                    {
+                        unite(i, j);
+                    }
+                }
+            }
+        }
+
+        // Collect groups
+        std::map<size_t, std::vector<size_t>> groups;  // root -> member indices
+        for (size_t i = 0; i < n; ++i) {
+            groups[find(i)].push_back(i);
+        }
+
+        // Build result: List of groups, each group is list of [id, source] pairs
+        X::List result;
+
+        for (auto& [root, members] : groups) {
+            X::List group;
+
+            for (size_t idx : members) {
+                ItemInfo* info = items[idx];
+                X::List pair;
+
+                // ID
+                pair += static_cast<long long>(info->id);
+
+                // Source(s)
+                if (info->sources.size() == 1) {
+                    // Single source - just the index
+                    pair += *info->sources.begin();
+                }
+                else {
+                    // Multiple sources - list of indices
+                    X::List sourceList;
+                    for (int src : info->sources) {
+                        sourceList += src;
+                    }
+                    pair += sourceList;
+                }
+
+                group += pair;
+            }
+
+            result += group;
+        }
+
+        retValue = result;
     }
 
     // ============================================================================
