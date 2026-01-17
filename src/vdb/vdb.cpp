@@ -198,7 +198,7 @@ namespace Quanta
 				return;
 			}
 			size_t i = 0;
-			for (auto& it : *list) {
+			for (auto it : *list) {
 				extIds[i++] = it.ToLongLong();
 			}
 		}
@@ -218,7 +218,7 @@ namespace Quanta
 		if (chunksVal.IsList()) {
 			X::List list(chunksVal);
 			if (list->Size() == n) {
-				for (auto& it : *list)
+				for (auto it : *list)
 				{
 					if (it.IsDict())
 					{

@@ -724,7 +724,7 @@ namespace Quanta
                 return;
             }
             size_t i = 0;
-            for (auto& item : *list) {
+            for (auto item : *list) {
                 extIds[i++] = item.ToLongLong();
             }
         }
@@ -743,7 +743,7 @@ namespace Quanta
                 X::List list(chunksVal);
                 if (list->Size() == n) {
                     size_t i = 0;
-                    for (auto& item : *list) {
+                    for (auto item : *list) {
                         chunkTexts[i++] = item.ToString();
                     }
                 }
@@ -935,7 +935,7 @@ namespace Quanta
             if (partVal.IsList()) {
                 X::List list(partVal);
                 std::vector<std::string> tags;
-                for (auto& item : *list) {
+                for (auto item : *list) {
                     tags.push_back(item.ToString());
                 }
                 customIndices = ResolveTagsToIndices(tags);
@@ -1069,7 +1069,7 @@ namespace Quanta
             if (!paramVal.IsList()) continue;
 
             X::List dictList(paramVal);
-            for (auto& item : *dictList) {
+            for (auto item : *dictList) {
                 if (!item.IsDict()) continue;
 
                 X::Dict dict(item);
