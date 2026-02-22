@@ -534,7 +534,7 @@ namespace Quanta
             if (filename.find(pattern) != 0) continue;
             if (filename.size() < 5 || filename.substr(filename.size() - 5) != ".hnsw") continue;
 
-            // Extract key: prefix_tsPartition_index.hnsw ¡ú tsPartition_index
+            // Extract key: prefix_tsPartition_index.hnsw ï¿½ï¿½ tsPartition_index
             std::string key = filename.substr(pattern.size());
             key = key.substr(0, key.size() - 5);  // Remove .hnsw
 
@@ -1075,12 +1075,27 @@ namespace Quanta
 
                 // Get partition info to locate vector
                 std::string fullKey;
+                std::string tsPartition;              // e.g. "2024-01"
+                std::string partitionTag = "default"; // tag like device_id
+                int customIndex = 0;
+                bool customIndexUnknown = false;
 
                 // Try full_partition_key first (for Seek results)
                 if (!fullPartitionKey.empty()) {
                     X::Value fpkVal = dict->Get(fullPartitionKey);
                     if (fpkVal.IsValid()) {
                         fullKey = fpkVal.ToString();
+                        // Parse "<tsPartition>_<customIndex>"
+                        size_t pos = fullKey.rfind('_');
+                        if (pos != std::string::npos) {
+                            tsPartition = fullKey.substr(0, pos);
+                            try {
+                                customIndex = std::stoi(fullKey.substr(pos + 1));
+                            }
+                            catch (...) {
+                                customIndex = 0;
+                            }
+                        }
                     }
                 }
 
@@ -1092,15 +1107,18 @@ namespace Quanta
                         timestampMs = tsVal.ToLongLong();
                     }
 
-                    std::string partitionTag = "default";
                     X::Value ptVal = dict->Get(partitionKey);
                     if (ptVal.IsValid()) {
                         partitionTag = ptVal.ToString();
                     }
 
-                    std::string tsPartition = TimestampToPartitionName(timestampMs);
-                    int customIndex = GetCustomIndex(partitionTag);
-                    if (customIndex < 0) customIndex = 0;
+                    tsPartition = TimestampToPartitionName(timestampMs);
+                    customIndex = GetCustomIndex(partitionTag);
+                    if (customIndex < 0) {
+                        // Unknown tag: we will try all custom partitions for this tsPartition
+                        customIndexUnknown = true;
+                        customIndex = 0;
+                    }
 
                     fullKey = tsPartition + "_" + std::to_string(customIndex);
                 }
@@ -1112,15 +1130,57 @@ namespace Quanta
 
                 // Fetch vector if not already fetched
                 if (info.vector.empty()) {
-                    Partition* partition = partitions_.count(fullKey) ?
-                        partitions_[fullKey].get() : LoadPartition(fullKey);
+                    auto tryGetVectorFromKey = [&](const std::string& key) -> bool {
+                        Partition* partition = partitions_.count(key) ?
+                            partitions_[key].get() : LoadPartition(key);
 
-                    if (partition && partition->vdb) {
-                        info.vector = partition->index->GetVectorById(id);
+                        if (!partition || !partition->index) return false;
+                        auto idx = partition->vdb->GetIndexById(id);
+                        if (idx < 0) return false;
+                        std::vector<float> v = partition->index->GetVectorById(idx);
+                        if (v.empty()) return false;
+
+                        info.vector = std::move(v);
+                        return true;
+                    };
+
+                    bool got = (!fullKey.empty()) ? tryGetVectorFromKey(fullKey) : false;
+
+                    // If tag not found, scan partitions_ for any partition key matching this tsPartition prefix.
+                    // NOTE: GetCustomIndex() only checks customPartitionTags_, so when it returns -1 we must search
+                    // existing partition instances by key prefix "<tsPartition>_".
+                    if (!got && customIndexUnknown && !tsPartition.empty()) {
+                        const std::string prefix = tsPartition + "_";
+                        std::vector<std::string> keys;
+                        keys.reserve(partitions_.size());
+
+                        for (const auto& pkv : partitions_) {
+                            const std::string& key = pkv.first;
+                            if (key.rfind(prefix, 0) == 0) {
+                                keys.push_back(key);
+                            }
+                        }
+
+                        // Deterministic order (useful if partitions_ is unordered_map)
+                        std::sort(keys.begin(), keys.end());
+
+                        for (const auto& key : keys) {
+                            if (tryGetVectorFromKey(key)) {
+                                got = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Always try default as last resort
+                    if (!got && !tsPartition.empty()) {
+                        (void)tryGetVectorFromKey(tsPartition + "_0");
                     }
                 }
+
             }
         }
+
         // Convert to vector for processing
         std::vector<ItemInfo*> items;
         items.reserve(allItems.size());
@@ -1210,7 +1270,7 @@ namespace Quanta
                 group += pair;
             }
 
-            result += group;
+			result->append(group);
         }
 
         retValue = result;

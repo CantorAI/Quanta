@@ -229,6 +229,15 @@ namespace Quanta {
 			}
 			return 0;
 		}
+        inline long long GetIndexById(unsigned long long id) const {
+			std::lock_guard<std::mutex> lock(mtx);
+            for (size_t i = 0; i < ids.size(); ++i) {
+                if (ids[i] == id) {
+                    return i;
+                }
+            }
+			return -1;
+		}
 		inline std::string GetTextById(unsigned long long id) const {
 			std::lock_guard<std::mutex> lock(mtx);
 			auto it = chunkMap.find(id);
