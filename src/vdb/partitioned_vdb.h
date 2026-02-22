@@ -22,7 +22,6 @@ namespace Quanta
     class PartitionedVdb
     {
         X::Value m_sqlite;
-        X::Runtime m_rt;
         X::Value m_configDb;
         // Config stored as map, synced to SQLite
         std::map<std::string, std::string> config_;

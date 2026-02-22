@@ -93,9 +93,7 @@ namespace Quanta
             X::Value retValue;
             Init(nullptr, nullptr, params, kwParams, retValue);
         }
-
         X::Runtime rt;
-        m_rt = rt;
         X::Package sqlite(rt, "sqlite", "xlang_sqlite");
         m_sqlite = sqlite;
 
@@ -592,8 +590,6 @@ namespace Quanta
     bool PartitionedVdb::Init(X::XRuntime* rt, X::XObj* pContext,
         X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
     {
-        X::Runtime xrt(rt);
-
         // Parse parameters into config map
         auto parseParam = [&](const std::string& key, const std::string& defaultVal) {
             if (auto it = kwParams.find(key.c_str()); it) {
@@ -661,8 +657,6 @@ namespace Quanta
     void PartitionedVdb::AddVectors(X::XRuntime* rt, X::XObj* pContext,
         X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
     {
-        X::Runtime xrt(rt);
-
         if (params.size() < 2) {
             retValue = X::Value(false);
             return;
