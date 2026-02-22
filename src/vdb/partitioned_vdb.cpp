@@ -1314,7 +1314,7 @@ namespace Quanta
     }
 
     // Convert the clustering result into the XLang return list.
-    // Each group is a list of [id, source] pairs.
+    // Each group is a flat list of IDs: [[ID1, ID2, ...], [ID3, ...], ...]
     X::Value PartitionedVdb::BuildGroupingResult(
         const std::vector<GroupingItem*>& items,
         const std::map<size_t, std::vector<size_t>>& groups)
@@ -1323,19 +1323,7 @@ namespace Quanta
         for (auto& [root, members] : groups) {
             X::List group;
             for (size_t idx : members) {
-                GroupingItem* info = items[idx];
-                X::List pair;
-                pair += static_cast<long long>(info->id);
-
-                if (info->sources.size() == 1) {
-                    pair += *info->sources.begin();
-                }
-                else {
-                    X::List sourceList;
-                    for (int src : info->sources) sourceList += src;
-                    pair += sourceList;
-                }
-                group += pair;
+                group += static_cast<long long>(items[idx]->id);
             }
             result->append(group);
         }
