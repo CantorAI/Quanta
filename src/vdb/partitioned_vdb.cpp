@@ -1016,48 +1016,135 @@ namespace Quanta
         retValue = resultList;
     }
 
-    void PartitionedVdb::Grouping(X::XRuntime* rt,
-        X::XObj* pContext, X::ARGS& params,
-        X::KWARGS& kwParams, X::Value& retValue)
+    // ============================================================================
+    // Grouping Helpers
+    // ============================================================================
+
+    // Resolve partition key from a dict item, using either a pre-built full key
+    // (e.g. from Lookup/Seek results) or constructing it from timestamp + partition tag.
+    // Returns the resolved partition key string (e.g. "2024-01_2") and sets
+    // customIndexUnknown=true when the tag wasn't found in the registry.
+    std::string PartitionedVdb::ResolveItemPartitionKey(
+        X::Dict& dict,
+        const std::string& fullPartitionKey,
+        const std::string& partitionKey,
+        const std::string& timestampKey,
+        bool& customIndexUnknown)
     {
-        // Parse kwParams for key names
-        std::string idKey = "image_id";
-        std::string partitionKey = "device_id";      // partition tag key (for SQL)
-        std::string timestampKey = "timestamp";
-        std::string fullPartitionKey = "";           // full partition key like "2024-01_0" (for Seek)
+        customIndexUnknown = false;
 
-        if (auto it = kwParams.find("id_key"); it) {
-            idKey = it->val.ToString();
-        }
-        if (auto it = kwParams.find("partition_key"); it) {
-            partitionKey = it->val.ToString();
-        }
-        if (auto it = kwParams.find("timestamp_key"); it) {
-            timestampKey = it->val.ToString();
-        }
-        if (auto it = kwParams.find("full_partition_key"); it) {
-            fullPartitionKey = it->val.ToString();
+        // Prefer a pre-built full key (e.g. "partition" field from Lookup results)
+        if (!fullPartitionKey.empty()) {
+            X::Value fpkVal = dict->Get(fullPartitionKey);
+            if (fpkVal.IsValid()) {
+                return fpkVal.ToString();
+            }
         }
 
-        // Last param is threshold, all others are dict lists
-        if (params.size() < 2) {
-            retValue = X::List();
-            return;
+        // Fall back: construct from timestamp + partition tag
+        long long timestampMs = 0;
+        X::Value tsVal = dict->Get(timestampKey);
+        if (tsVal.IsValid()) {
+            timestampMs = tsVal.ToLongLong();
         }
 
-        float threshold = (float)params[params.size() - 1];
+        std::string tag = "default";
+        X::Value ptVal = dict->Get(partitionKey);
+        if (ptVal.IsValid()) {
+            tag = ptVal.ToString();
+        }
 
-        // Collect all items from all sources with their vectors
-        // Structure: (id, source_indices, vector)
-        struct ItemInfo {
-            unsigned long long id;
-            std::set<int> sources;  // which param indices this ID came from
-            std::vector<float> vector;
+        std::string tsPartition = TimestampToPartitionName(timestampMs);
+        int customIndex = GetCustomIndex(tag);
+        if (customIndex < 0) {
+            customIndexUnknown = true;
+            customIndex = 0;
+        }
+
+        return tsPartition + "_" + std::to_string(customIndex);
+    }
+
+    // Fetch the embedding vector for a given item ID.
+    // Searches the primary key first, then scans partitions with the same tsPartition
+    // prefix (both in-memory and on-disk) when the custom index is unknown.
+    std::vector<float> PartitionedVdb::FetchVectorForItem(
+        unsigned long long id,
+        const std::string& fullKey,
+        bool customIndexUnknown)
+    {
+        // Extract tsPartition prefix from the key (e.g. "2024-01" from "2024-01_0")
+        std::string tsPartition;
+        {
+            size_t pos = fullKey.rfind('_');
+            if (pos != std::string::npos) {
+                tsPartition = fullKey.substr(0, pos);
+            }
+        }
+
+        // Try loading from one specific partition key; returns the vector or empty.
+        auto tryKey = [&](const std::string& key) -> std::vector<float> {
+            Partition* partition = partitions_.count(key) ?
+                partitions_[key].get() : LoadPartition(key);
+            if (!partition || !partition->index) return {};
+            auto idx = partition->vdb->GetIndexById(id);
+            if (idx < 0) return {};
+            return partition->index->GetVectorById(idx);
         };
 
-        std::map<unsigned long long, ItemInfo> allItems;  // id -> info
+        // 1. Try the primary key directly.
+        if (!fullKey.empty()) {
+            auto v = tryKey(fullKey);
+            if (!v.empty()) return v;
+        }
 
-        // Process each dict list (source)
+        // 2. If the partition tag was unknown, scan all partitions for this tsPartition.
+        if (customIndexUnknown && !tsPartition.empty()) {
+            const std::string keyPrefix = tsPartition + "_";
+            std::vector<std::string> keys;
+
+            // In-memory partitions
+            for (const auto& pkv : partitions_) {
+                if (pkv.first.rfind(keyPrefix, 0) == 0) {
+                    keys.push_back(pkv.first);
+                }
+            }
+
+            // On-disk partitions (ScanMatchingPartitions deduplicates with in-memory)
+            auto [tsStart, tsEnd] = PartitionNameToTimeRange(tsPartition);
+            std::set<int> allIndices;
+            for (const auto& k : ScanMatchingPartitions(tsStart, tsEnd, allIndices)) {
+                if (k.rfind(keyPrefix, 0) == 0 &&
+                    std::find(keys.begin(), keys.end(), k) == keys.end()) {
+                    keys.push_back(k);
+                }
+            }
+
+            std::sort(keys.begin(), keys.end());
+            for (const auto& k : keys) {
+                auto v = tryKey(k);
+                if (!v.empty()) return v;
+            }
+        }
+
+        // 3. Last resort: the default sub-partition for this time slot.
+        if (!tsPartition.empty()) {
+            auto v = tryKey(tsPartition + "_0");
+            if (!v.empty()) return v;
+        }
+
+        return {};
+    }
+
+    // Walk every source dict-list in params (all except the last threshold param)
+    // and populate allItems with id -> {sources, vector}.
+    void PartitionedVdb::CollectGroupingItems(
+        X::ARGS& params,
+        const std::string& idKey,
+        const std::string& partitionKey,
+        const std::string& timestampKey,
+        const std::string& fullPartitionKey,
+        GroupingItemMap& allItems)
+    {
         for (size_t srcIdx = 0; srcIdx < params.size() - 1; ++srcIdx) {
             X::Value paramVal = params[srcIdx];
             if (!paramVal.IsList()) continue;
@@ -1065,129 +1152,231 @@ namespace Quanta
             X::List dictList(paramVal);
             for (auto item : *dictList) {
                 if (!item.IsDict()) continue;
-
                 X::Dict dict(item);
 
-                // Get ID
                 X::Value idVal = dict->Get(idKey);
                 if (!idVal.IsValid()) continue;
                 unsigned long long id = static_cast<unsigned long long>(idVal.ToLongLong());
 
-                // Get partition info to locate vector
-                std::string fullKey;
-                std::string tsPartition;              // e.g. "2024-01"
-                std::string partitionTag = "default"; // tag like device_id
-                int customIndex = 0;
                 bool customIndexUnknown = false;
+                std::string fullKey = ResolveItemPartitionKey(
+                    dict, fullPartitionKey, partitionKey, timestampKey, customIndexUnknown);
 
-                // Try full_partition_key first (for Seek results)
-                if (!fullPartitionKey.empty()) {
-                    X::Value fpkVal = dict->Get(fullPartitionKey);
-                    if (fpkVal.IsValid()) {
-                        fullKey = fpkVal.ToString();
-                        // Parse "<tsPartition>_<customIndex>"
-                        size_t pos = fullKey.rfind('_');
-                        if (pos != std::string::npos) {
-                            tsPartition = fullKey.substr(0, pos);
-                            try {
-                                customIndex = std::stoi(fullKey.substr(pos + 1));
-                            }
-                            catch (...) {
-                                customIndex = 0;
-                            }
-                        }
-                    }
-                }
-
-                // If no full key, construct from timestamp and partition tag
-                if (fullKey.empty()) {
-                    long long timestampMs = 0;
-                    X::Value tsVal = dict->Get(timestampKey);
-                    if (tsVal.IsValid()) {
-                        timestampMs = tsVal.ToLongLong();
-                    }
-
-                    X::Value ptVal = dict->Get(partitionKey);
-                    if (ptVal.IsValid()) {
-                        partitionTag = ptVal.ToString();
-                    }
-
-                    tsPartition = TimestampToPartitionName(timestampMs);
-                    customIndex = GetCustomIndex(partitionTag);
-                    if (customIndex < 0) {
-                        // Unknown tag: we will try all custom partitions for this tsPartition
-                        customIndexUnknown = true;
-                        customIndex = 0;
-                    }
-
-                    fullKey = tsPartition + "_" + std::to_string(customIndex);
-                }
-
-                // Add source index to this ID
                 auto& info = allItems[id];
                 info.id = id;
                 info.sources.insert(static_cast<int>(srcIdx));
 
-                // Fetch vector if not already fetched
                 if (info.vector.empty()) {
-                    auto tryGetVectorFromKey = [&](const std::string& key) -> bool {
-                        Partition* partition = partitions_.count(key) ?
-                            partitions_[key].get() : LoadPartition(key);
+                    info.vector = FetchVectorForItem(id, fullKey, customIndexUnknown);
+                }
+            }
+        }
+    }
 
-                        if (!partition || !partition->index) return false;
-                        auto idx = partition->vdb->GetIndexById(id);
-                        if (idx < 0) return false;
-                        std::vector<float> v = partition->index->GetVectorById(idx);
-                        if (v.empty()) return false;
+    // Greedy centroid (leader) clustering.
+    //
+    // WHY NOT Union-Find / single-linkage?
+    //   Single-linkage merges A and C if A~B and B~C, even when A and C are far apart.
+    //   This "chaining" produces long, thin clusters (a line), not compact ones (a circle).
+    //
+    // THIS ALGORITHM guarantees that every member is within `threshold` similarity
+    // of its group CENTROID, giving the round/compact clusters the user wants:
+    //   For each item: find the closest centroid; join if >= threshold, else new group.
+    //
+    // EFFICIENCY:
+    //   - Vectors are pre-normalized to unit length ONCE (parallel).
+    //     After that, cosine_similarity = dot product only  (no sqrt in the hot path).
+    //   - Centroids are kept as normalized unit vectors (normalized mean direction).
+    //     Centroid update: normalize(old_centroid * count + new_vec).
+    //   - The inner centroid-search loop is read-only per item → safe for OMP reduction.
+    //     The outer item loop stays serial (adding new centroids changes shared state).
+    //   - Complexity: O(N × G) where G = number of groups.
+    std::map<size_t, std::vector<size_t>> PartitionedVdb::RunCentroidClustering(
+        const std::vector<GroupingItem*>& items,
+        float threshold)
+    {
+        const size_t n   = items.size();
+        const size_t dim = static_cast<size_t>(dimension_);
 
-                        info.vector = std::move(v);
-                        return true;
-                    };
+        // -----------------------------------------------------------------------
+        // Step 1: Pre-normalize all valid vectors to unit length (parallel).
+        //   After this, cosine_sim(a, b) = dot(a, b)  — no sqrt in the hot path.
+        // -----------------------------------------------------------------------
+        std::vector<std::vector<float>> unitVecs(n);  // unitVecs[i] is empty if invalid
 
-                    bool got = (!fullKey.empty()) ? tryGetVectorFromKey(fullKey) : false;
+#pragma omp parallel for schedule(static)
+        for (long long i = 0; i < static_cast<long long>(n); ++i) {
+            const auto& src = items[i]->vector;
+            if (src.size() != dim) continue;
 
-                    // If tag not found, scan partitions_ for any partition key matching this tsPartition prefix.
-                    // NOTE: GetCustomIndex() only checks customPartitionTags_, so when it returns -1 we must search
-                    // existing partition instances by key prefix "<tsPartition>_".
-                    if (!got && customIndexUnknown && !tsPartition.empty()) {
-                        const std::string prefix = tsPartition + "_";
-                        std::vector<std::string> keys;
-                        keys.reserve(partitions_.size());
+            float norm = 0.0f;
+            for (size_t d = 0; d < dim; ++d) norm += src[d] * src[d];
+            if (norm <= 0.0f) continue;
 
-                        for (const auto& pkv : partitions_) {
-                            const std::string& key = pkv.first;
-                            if (key.rfind(prefix, 0) == 0) {
-                                keys.push_back(key);
-                            }
-                        }
+            norm = std::sqrt(norm);
+            unitVecs[i].resize(dim);
+            for (size_t d = 0; d < dim; ++d) unitVecs[i][d] = src[d] / norm;
+        }
 
-                        // Deterministic order (useful if partitions_ is unordered_map)
-                        std::sort(keys.begin(), keys.end());
+        // -----------------------------------------------------------------------
+        // Step 2: Greedy centroid assignment (serial outer loop).
+        //   centroids[g]     = unit-length centroid of group g (normalized mean direction)
+        //   centroidCounts[g] = number of members (for weighted update)
+        //   groupMembers[g]  = ordered item indices
+        // -----------------------------------------------------------------------
+        std::vector<std::vector<float>> centroids;
+        std::vector<size_t>             centroidCounts;
+        std::vector<std::vector<size_t>> groupMembers;
 
-                        for (const auto& key : keys) {
-                            if (tryGetVectorFromKey(key)) {
-                                got = true;
-                                break;
-                            }
+        for (size_t i = 0; i < n; ++i) {
+            if (unitVecs[i].empty()) continue;  // invalid / wrong dimension
+            const float* vec = unitVecs[i].data();
+
+            // Find the best matching centroid.
+            // Inner scan is read-only → parallelizable with OMP reduction.
+            int   bestGroup = -1;
+            float bestSim   = -2.0f;  // cosine ∈ [-1, 1]
+
+            const size_t G = centroids.size();
+
+            if (G > 0) {
+                // For small G the overhead of OMP outweighs the benefit.
+                // Only go parallel when there are enough groups to amortize launch cost.
+                if (G >= 16) {
+#pragma omp parallel for schedule(static) reduction(max: bestSim)
+                    for (long long g = 0; g < static_cast<long long>(G); ++g) {
+                        float sim = 0.0f;
+                        const float* c = centroids[g].data();
+                        for (size_t d = 0; d < dim; ++d) sim += vec[d] * c[d];
+                        if (sim > bestSim) {
+                            bestSim  = sim;
+                            // NOTE: bestGroup update is not safe inside OMP max reduction.
+                            // We re-scan serially below in that case.
                         }
                     }
-
-                    // Always try default as last resort
-                    if (!got && !tsPartition.empty()) {
-                        (void)tryGetVectorFromKey(tsPartition + "_0");
+                    // Re-scan serially to find which group achieved bestSim
+                    // (OMP reduction only tracks the max value, not the index).
+                    for (size_t g = 0; g < G; ++g) {
+                        float sim = 0.0f;
+                        const float* c = centroids[g].data();
+                        for (size_t d = 0; d < dim; ++d) sim += vec[d] * c[d];
+                        if (sim >= bestSim) { bestGroup = static_cast<int>(g); break; }
                     }
                 }
+                else {
+                    // Serial scan (faster for small G)
+                    for (size_t g = 0; g < G; ++g) {
+                        float sim = 0.0f;
+                        const float* c = centroids[g].data();
+                        for (size_t d = 0; d < dim; ++d) sim += vec[d] * c[d];
+                        if (sim > bestSim) { bestSim = sim; bestGroup = static_cast<int>(g); }
+                    }
+                }
+            }
 
+            if (bestGroup >= 0 && bestSim >= threshold) {
+                // Join existing group and update centroid (normalized mean direction).
+                groupMembers[bestGroup].push_back(i);
+                size_t cnt = ++centroidCounts[bestGroup];
+                auto& centroid = centroids[bestGroup];
+
+                // new_centroid_unnorm = old_centroid * (cnt-1) + vec
+                // then normalize — we store the normalized direction so future
+                // dot products remain in [-1,1].
+                float norm = 0.0f;
+                for (size_t d = 0; d < dim; ++d) {
+                    centroid[d] = centroid[d] * static_cast<float>(cnt - 1) + vec[d];
+                    norm += centroid[d] * centroid[d];
+                }
+                norm = std::sqrt(norm);
+                if (norm > 0.0f)
+                    for (size_t d = 0; d < dim; ++d) centroid[d] /= norm;
+            }
+            else {
+                // Start a new group; the first member's unit vector IS the centroid.
+                groupMembers.push_back({ i });
+                centroids.push_back(unitVecs[i]);
+                centroidCounts.push_back(1);
             }
         }
 
-        // Convert to vector for processing
-        std::vector<ItemInfo*> items;
+        // -----------------------------------------------------------------------
+        // Step 3: Convert to map<root, members> for BuildGroupingResult.
+        // -----------------------------------------------------------------------
+        std::map<size_t, std::vector<size_t>> groups;
+        for (size_t g = 0; g < groupMembers.size(); ++g) {
+            if (!groupMembers[g].empty()) {
+                size_t root = groupMembers[g].front();
+                groups[root] = std::move(groupMembers[g]);
+            }
+        }
+        return groups;
+    }
+
+    // Convert the clustering result into the XLang return list.
+    // Each group is a list of [id, source] pairs.
+    X::Value PartitionedVdb::BuildGroupingResult(
+        const std::vector<GroupingItem*>& items,
+        const std::map<size_t, std::vector<size_t>>& groups)
+    {
+        X::List result;
+        for (auto& [root, members] : groups) {
+            X::List group;
+            for (size_t idx : members) {
+                GroupingItem* info = items[idx];
+                X::List pair;
+                pair += static_cast<long long>(info->id);
+
+                if (info->sources.size() == 1) {
+                    pair += *info->sources.begin();
+                }
+                else {
+                    X::List sourceList;
+                    for (int src : info->sources) sourceList += src;
+                    pair += sourceList;
+                }
+                group += pair;
+            }
+            result->append(group);
+        }
+        return result;
+    }
+
+    // ============================================================================
+    // Public API: Grouping
+    // ============================================================================
+
+    void PartitionedVdb::Grouping(X::XRuntime* rt,
+        X::XObj* pContext, X::ARGS& params,
+        X::KWARGS& kwParams, X::Value& retValue)
+    {
+        if (params.size() < 2) {
+            retValue = X::List();
+            return;
+        }
+
+        // Parse field-name overrides from keyword args
+        std::string idKey          = "image_id";
+        std::string partitionKey   = "device_id";
+        std::string timestampKey   = "timestamp";
+        std::string fullPartKey    = "";   // e.g. "partition" from Lookup results
+
+        if (auto it = kwParams.find("id_key"); it)            idKey        = it->val.ToString();
+        if (auto it = kwParams.find("partition_key"); it)     partitionKey = it->val.ToString();
+        if (auto it = kwParams.find("timestamp_key"); it)     timestampKey = it->val.ToString();
+        if (auto it = kwParams.find("full_partition_key"); it) fullPartKey = it->val.ToString();
+
+        float threshold = static_cast<float>(params[params.size() - 1]);
+
+        // Step 1: collect all items and their vectors from every source list
+        GroupingItemMap allItems;
+        CollectGroupingItems(params, idKey, partitionKey, timestampKey, fullPartKey, allItems);
+
+        // Step 2: build a flat pointer array (only items whose vectors were resolved)
+        std::vector<GroupingItem*> items;
         items.reserve(allItems.size());
         for (auto& [id, info] : allItems) {
-            if (!info.vector.empty()) {
-                items.push_back(&info);
-            }
+            if (!info.vector.empty()) items.push_back(&info);
         }
 
         if (items.empty()) {
@@ -1195,85 +1384,11 @@ namespace Quanta
             return;
         }
 
-        // Union-Find for grouping
-        std::vector<size_t> parent(items.size());
-        std::iota(parent.begin(), parent.end(), 0);
+        // Step 3: cluster into compact groups using centroid similarity
+        auto groups = RunCentroidClustering(items, threshold);
 
-        std::function<size_t(size_t)> find = [&](size_t x) -> size_t {
-            if (parent[x] != x) {
-                parent[x] = find(parent[x]);
-            }
-            return parent[x];
-            };
-
-        auto unite = [&](size_t x, size_t y) {
-            size_t px = find(x);
-            size_t py = find(y);
-            if (px != py) {
-                parent[px] = py;
-            }
-            };
-
-        // Compare all pairs and group similar ones
-        size_t n = items.size();
-#pragma omp parallel for schedule(dynamic)
-        for (long long i = 0; i < static_cast<long long>(n); ++i) {
-            for (size_t j = i + 1; j < n; ++j) {
-                float sim = quanta_cosine_similarity(
-                    dimension_,
-                    items[i]->vector.data(),
-                    items[j]->vector.data()
-                );
-
-                if (sim >= threshold) {
-#pragma omp critical
-                    {
-                        unite(i, j);
-                    }
-                }
-            }
-        }
-
-        // Collect groups
-        std::map<size_t, std::vector<size_t>> groups;  // root -> member indices
-        for (size_t i = 0; i < n; ++i) {
-            groups[find(i)].push_back(i);
-        }
-
-        // Build result: List of groups, each group is list of [id, source] pairs
-        X::List result;
-
-        for (auto& [root, members] : groups) {
-            X::List group;
-
-            for (size_t idx : members) {
-                ItemInfo* info = items[idx];
-                X::List pair;
-
-                // ID
-                pair += static_cast<long long>(info->id);
-
-                // Source(s)
-                if (info->sources.size() == 1) {
-                    // Single source - just the index
-                    pair += *info->sources.begin();
-                }
-                else {
-                    // Multiple sources - list of indices
-                    X::List sourceList;
-                    for (int src : info->sources) {
-                        sourceList += src;
-                    }
-                    pair += sourceList;
-                }
-
-                group += pair;
-            }
-
-			result->append(group);
-        }
-
-        retValue = result;
+        // Step 4: serialize groups into an XLang list
+        retValue = BuildGroupingResult(items, groups);
     }
 
     // ============================================================================

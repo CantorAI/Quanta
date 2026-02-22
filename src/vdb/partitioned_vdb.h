@@ -1,4 +1,4 @@
-#pragma once
+ï»¿#pragma once
 #include "xpackage.h"
 #include <map>
 #include <set>
@@ -6,11 +6,14 @@
 #include <memory>
 #include <filesystem>
 
+
+
+
 namespace Quanta
 {
     namespace fs = std::filesystem;
-	class HnswVdb;
-	class VectorDatabase;
+        class HnswVdb;
+        class VectorDatabase;
 
     // Single partition: index + database
     struct Partition {
@@ -39,13 +42,21 @@ namespace Quanta
         int efConstruction_ = 200;
         int efSearch_ = 50;
 
-        // Custom partitions: index ¡ú tags
+        // Custom partitions: index -> tags
         std::map<int, std::set<std::string>> customPartitionTags_;
         std::map<std::string, int> tagToIndex_;
         int nextCustomIndex_ = 1;  // 0 = "default"
 
-        // Loaded partitions: "2024-01_0" ¡ú Partition
+        // Loaded partitions: "2024-01_0" -> Partition
         std::map<std::string, std::unique_ptr<Partition>> partitions_;
+
+        // Type aliases used by the Grouping helpers
+        struct GroupingItem {
+            unsigned long long id;
+            std::set<int> sources;   // which source-list indices this ID came from
+            std::vector<float> vector;
+        };
+        using GroupingItemMap = std::map<unsigned long long, GroupingItem>;
 
     public:
         BEGIN_PACKAGE(PartitionedVdb)
@@ -116,5 +127,34 @@ namespace Quanta
         fs::path GetDbPath();
         fs::path GetHnswPath(const std::string& tsPartition, int customIndex);
         fs::path GetVdbPath(const std::string& tsPartition, int customIndex);
+
+        // Grouping helpers
+        std::string ResolveItemPartitionKey(
+            X::Dict& dict,
+            const std::string& fullPartitionKey,
+            const std::string& partitionKey,
+            const std::string& timestampKey,
+            bool& customIndexUnknown);
+
+        std::vector<float> FetchVectorForItem(
+            unsigned long long id,
+            const std::string& fullKey,
+            bool customIndexUnknown);
+
+        void CollectGroupingItems(
+            X::ARGS& params,
+            const std::string& idKey,
+            const std::string& partitionKey,
+            const std::string& timestampKey,
+            const std::string& fullPartitionKey,
+            GroupingItemMap& allItems);
+
+        std::map<size_t, std::vector<size_t>> RunCentroidClustering(
+            const std::vector<GroupingItem*>& items,
+            float threshold);
+
+        X::Value BuildGroupingResult(
+            const std::vector<GroupingItem*>& items,
+            const std::map<size_t, std::vector<size_t>>& groups);
     };
 }
