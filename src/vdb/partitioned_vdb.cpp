@@ -1135,40 +1135,33 @@ namespace Quanta
         return {};
     }
 
-    // Walk every source dict-list in params (all except the last threshold param)
-    // and populate allItems with id -> {sources, vector}.
+    // Walk the combined dict-list and populate allItems with id -> {vector}.
     void PartitionedVdb::CollectGroupingItems(
-        X::ARGS& params,
+        X::List& itemsList,
         const std::string& idKey,
         const std::string& partitionKey,
         const std::string& timestampKey,
         const std::string& fullPartitionKey,
         GroupingItemMap& allItems)
     {
-        for (size_t srcIdx = 0; srcIdx < params.size() - 1; ++srcIdx) {
-            X::Value paramVal = params[srcIdx];
-            if (!paramVal.IsList()) continue;
+        for (auto item : *itemsList) {
+            if (!item.IsDict()) continue;
+            X::Dict dict(item);
 
-            X::List dictList(paramVal);
-            for (auto item : *dictList) {
-                if (!item.IsDict()) continue;
-                X::Dict dict(item);
+            X::Value idVal = dict->Get(idKey);
+            if (!idVal.IsValid()) continue;
+            unsigned long long id = static_cast<unsigned long long>(idVal.ToLongLong());
 
-                X::Value idVal = dict->Get(idKey);
-                if (!idVal.IsValid()) continue;
-                unsigned long long id = static_cast<unsigned long long>(idVal.ToLongLong());
+            bool customIndexUnknown = false;
+            std::string fullKey = ResolveItemPartitionKey(
+                dict, fullPartitionKey, partitionKey, timestampKey, customIndexUnknown);
 
-                bool customIndexUnknown = false;
-                std::string fullKey = ResolveItemPartitionKey(
-                    dict, fullPartitionKey, partitionKey, timestampKey, customIndexUnknown);
+            auto& info = allItems[id];
+            info.id = id;
+            info.sources.insert(0);   // all items are "source 0" (combined pool)
 
-                auto& info = allItems[id];
-                info.id = id;
-                info.sources.insert(static_cast<int>(srcIdx));
-
-                if (info.vector.empty()) {
-                    info.vector = FetchVectorForItem(id, fullKey, customIndexUnknown);
-                }
+            if (info.vector.empty()) {
+                info.vector = FetchVectorForItem(id, fullKey, customIndexUnknown);
             }
         }
     }
@@ -1338,7 +1331,14 @@ namespace Quanta
         X::XObj* pContext, X::ARGS& params,
         X::KWARGS& kwParams, X::Value& retValue)
     {
+        // params[0] = combined list of dicts (all candidates, VDB + SQL merged)
+        // params[1] = threshold (float)
         if (params.size() < 2) {
+            retValue = X::List();
+            return;
+        }
+
+        if (!params[0].IsList()) {
             retValue = X::List();
             return;
         }
@@ -1347,18 +1347,19 @@ namespace Quanta
         std::string idKey          = "image_id";
         std::string partitionKey   = "device_id";
         std::string timestampKey   = "timestamp";
-        std::string fullPartKey    = "";   // e.g. "partition" from Lookup results
+        std::string fullPartKey    = "";   // e.g. "full_partition_key" from Lookup results
 
-        if (auto it = kwParams.find("id_key"); it)            idKey        = it->val.ToString();
-        if (auto it = kwParams.find("partition_key"); it)     partitionKey = it->val.ToString();
-        if (auto it = kwParams.find("timestamp_key"); it)     timestampKey = it->val.ToString();
-        if (auto it = kwParams.find("full_partition_key"); it) fullPartKey = it->val.ToString();
+        if (auto it = kwParams.find("id_key"); it)             idKey        = it->val.ToString();
+        if (auto it = kwParams.find("partition_key"); it)      partitionKey = it->val.ToString();
+        if (auto it = kwParams.find("timestamp_key"); it)      timestampKey = it->val.ToString();
+        if (auto it = kwParams.find("full_partition_key"); it) fullPartKey  = it->val.ToString();
 
-        float threshold = static_cast<float>(params[params.size() - 1]);
+        float threshold = static_cast<float>(params[1]);
 
-        // Step 1: collect all items and their vectors from every source list
+        // Step 1: collect all items and their vectors from the combined list
         GroupingItemMap allItems;
-        CollectGroupingItems(params, idKey, partitionKey, timestampKey, fullPartKey, allItems);
+        X::List combined(params[0]);
+        CollectGroupingItems(combined, idKey, partitionKey, timestampKey, fullPartKey, allItems);
 
         // Step 2: build a flat pointer array (only items whose vectors were resolved)
         std::vector<GroupingItem*> items;

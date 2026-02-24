@@ -142,7 +142,7 @@ namespace Quanta
             bool customIndexUnknown);
 
         void CollectGroupingItems(
-            X::ARGS& params,
+            X::List& itemsList,
             const std::string& idKey,
             const std::string& partitionKey,
             const std::string& timestampKey,
