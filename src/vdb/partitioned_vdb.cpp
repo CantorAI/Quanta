@@ -88,14 +88,16 @@ namespace Quanta
 
     PartitionedVdb::PartitionedVdb(X::ARGS& params, X::KWARGS& kwParams)
     {
+        // Load SQLite package FIRST (required by Init -> InitDatabase)
+        X::Runtime rt;
+        X::Package sqlite(rt, "sqlite", "xlang_sqlite");
+        m_sqlite = sqlite;
+
         // If params/kwargs provided, call Init
         if (params.size() > 0 || kwParams.size() > 0) {
             X::Value retValue;
             Init(nullptr, nullptr, params, kwParams, retValue);
         }
-        X::Runtime rt;
-        X::Package sqlite(rt, "sqlite", "xlang_sqlite");
-        m_sqlite = sqlite;
 
         // Initialize default partition (index 0)
         customPartitionTags_[0].insert("default");
@@ -644,7 +646,27 @@ namespace Quanta
         // Create directory and initialize database
         fs::create_directories(basePath_);
         InitDatabase();
-        SyncConfigToDB();
+
+        // If the DB already has config data (i.e. this is an existing VDB),
+        // load from it instead of overwriting with fresh defaults.
+        {
+            auto statement = m_configDb["statement"];
+            X::Value statusROW = m_sqlite["ROW"];
+            X::Value countStat = statement("SELECT COUNT(*) FROM config");
+            int configCount = 0;
+            if (countStat["step"]() == statusROW) {
+                configCount = countStat["get"](0).ToInt();
+            }
+            if (configCount > 0) {
+                // Existing DB: load config and partitions from it
+                LoadConfigFromDB();
+                LoadCustomPartitionsFromDB();
+            }
+            else {
+                // Fresh DB: sync our in-memory config to it
+                SyncConfigToDB();
+            }
+        }
 
         retValue = X::Value(true);
         return true;
@@ -747,8 +769,8 @@ namespace Quanta
             }
         }
 
-        // Add to partition
-        std::vector<unsigned long long> recIdx = partition->vdb->AddLabels(extIds, chunkTexts);
+        // Add to partition (with timestamp)
+        std::vector<unsigned long long> recIdx = partition->vdb->AddLabels(extIds, chunkTexts, static_cast<unsigned long long>(timestampMs));
         partition->index->AddVectors(recIdx, rawPtr, totalCount, numThreads);
         partition->count += n;
 
@@ -953,7 +975,8 @@ namespace Quanta
         }
 
         // Query each partition
-        std::vector<std::tuple<unsigned long long, float, std::string, std::string>> allResults;
+        // Results: id, score, chunk_text, partition_key, timestamp_ms
+        std::vector<std::tuple<unsigned long long, float, std::string, std::string, unsigned long long>> allResults;
 
         for (const auto& key : matchingKeys) {
             Partition* partition = partitions_.count(key) ?
@@ -981,7 +1004,8 @@ namespace Quanta
                 for (size_t idx : keptIndices) {
                     unsigned long long extId = partition->vdb->GetIdByIndex(results[idx].first);
                     std::string text = partition->vdb->GetTextById(extId);
-                    allResults.emplace_back(extId, results[idx].second, text, key);
+                    unsigned long long tsMs = partition->vdb->GetTimestampById(extId);
+                    allResults.emplace_back(extId, results[idx].second, text, key, tsMs);
                 }
             }
             else {
@@ -989,9 +1013,28 @@ namespace Quanta
                 for (const auto& [internalIdx, score] : results) {
                     unsigned long long extId = partition->vdb->GetIdByIndex(internalIdx);
                     std::string text = partition->vdb->GetTextById(extId);
-                    allResults.emplace_back(extId, score, text, key);
+                    unsigned long long tsMs = partition->vdb->GetTimestampById(extId);
+                    allResults.emplace_back(extId, score, text, key, tsMs);
                 }
             }
+        }
+
+        // Precise time-range post-filter (ms-level)
+        // This filters individual results by their exact stored timestamp,
+        // beyond the coarse partition-level pre-filter above.
+        if (tsStartMs > 0 || tsEndMs > 0) {
+            long long filterStart = (tsStartMs > 0) ? tsStartMs : 0;
+            long long filterEnd = (tsEndMs > 0) ? tsEndMs : LLONG_MAX;
+            allResults.erase(
+                std::remove_if(allResults.begin(), allResults.end(),
+                    [filterStart, filterEnd](const auto& r) {
+                        long long ts = static_cast<long long>(std::get<4>(r));
+                        // Keep items with ts==0 (no stored timestamp) to avoid
+                        // dropping legacy data that predates timestamp storage.
+                        if (ts == 0) return false;
+                        return ts < filterStart || ts > filterEnd;
+                    }),
+                allResults.end());
         }
 
         // Sort by score descending
@@ -1000,7 +1043,7 @@ namespace Quanta
                 return std::get<1>(a) > std::get<1>(b);
             });
 
-        // Return top K
+        // Return top K (5-element tuples: id, score, chunk, key, timestamp_ms)
         X::List resultList;
         size_t count = std::min(static_cast<size_t>(topK), allResults.size());
         for (size_t i = 0; i < count; ++i) {
@@ -1010,6 +1053,7 @@ namespace Quanta
             item += std::get<1>(r);
             item += std::get<2>(r);
             item += std::get<3>(r);
+            item += static_cast<long long>(std::get<4>(r));
             resultList->AddItem(item);
         }
 
@@ -1391,6 +1435,10 @@ namespace Quanta
         }
 
         fs::create_directories(basePath_);
+
+        // Persist config and custom partitions to the manifest DB
+        UpdateConfigFromMembers();
+        SyncConfigToDB();
 
         for (auto& [key, partition] : partitions_) {
             size_t pos = key.rfind('_');

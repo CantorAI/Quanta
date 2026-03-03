@@ -22,18 +22,23 @@ namespace Quanta {
         virtual ~VectorDatabase() {}
 
 		inline int GetDimension() const { return D; }
-        // Add a new record with label text. Returns the index in `ids`.
-        unsigned long long AddLabel(unsigned long long id, const std::string& text) {
+        // Add a new record with label text and optional timestamp. Returns the index in `ids`.
+        unsigned long long AddLabel(unsigned long long id, const std::string& text,
+            unsigned long long timestampMs = 0) {
             std::lock_guard<std::mutex> lock(mtx);
             ids.push_back(id);
             chunkMap[id] = text;
+            if (timestampMs > 0) {
+                timestampMap_[id] = timestampMs;
+            }
             return static_cast<unsigned long long>(ids.size() - 1);
         }
 
         // Add multiple records with sequential IDs starting from startId.
         // Returns vector of indices in `ids`.
         std::vector<unsigned long long> AddLabels(unsigned long long startId,
-            const std::vector<std::string>& texts) {
+            const std::vector<std::string>& texts,
+            unsigned long long timestampMs = 0) {
             std::lock_guard<std::mutex> lock(mtx);
             std::vector<unsigned long long> indices;
             indices.reserve(texts.size());
@@ -41,12 +46,16 @@ namespace Quanta {
                 unsigned long long id = startId + static_cast<unsigned long long>(i);
                 ids.push_back(id);
                 chunkMap[id] = texts[i];
+                if (timestampMs > 0) {
+                    timestampMap_[id] = timestampMs;
+                }
                 indices.push_back(static_cast<unsigned long long>(ids.size() - 1));
             }
             return indices;
         }
         std::vector<unsigned long long> AddLabels(const std::vector<unsigned long long>& ids0,
-            const std::vector<std::string>& texts) {
+            const std::vector<std::string>& texts,
+            unsigned long long timestampMs = 0) {
             if (ids0.size() != texts.size())
             {
                 return std::vector<unsigned long long>();
@@ -58,9 +67,29 @@ namespace Quanta {
                 unsigned long long id = ids0[i];
                 ids.push_back(id);
                 chunkMap[id] = texts[i];
+                if (timestampMs > 0) {
+                    timestampMap_[id] = timestampMs;
+                }
                 indices.push_back(static_cast<unsigned long long>(ids.size() - 1));
             }
             return indices;
+        }
+
+        // Set timestamps for multiple IDs at once
+        void SetTimestamps(const std::vector<unsigned long long>& ids0,
+            unsigned long long timestampMs) {
+            if (timestampMs == 0) return;
+            std::lock_guard<std::mutex> lock(mtx);
+            for (auto id : ids0) {
+                timestampMap_[id] = timestampMs;
+            }
+        }
+
+        // Get timestamp for a specific ID (returns 0 if not found)
+        unsigned long long GetTimestampById(unsigned long long id) const {
+            std::lock_guard<std::mutex> lock(mtx);
+            auto it = timestampMap_.find(id);
+            return (it != timestampMap_.end()) ? it->second : 0;
         }
 
         // Add or update a parameter.
@@ -150,6 +179,16 @@ namespace Quanta {
                 ofs.write(reinterpret_cast<const char*>(&len), sizeof(len));
                 ofs.write(text.data(), len);
             }
+
+            // Write timestamps (new section, backward-compatible)
+            size_t numTimestamps = timestampMap_.size();
+            ofs.write(reinterpret_cast<const char*>(&numTimestamps), sizeof(numTimestamps));
+            for (const auto& kv : timestampMap_) {
+                unsigned long long id = kv.first;
+                unsigned long long ts = kv.second;
+                ofs.write(reinterpret_cast<const char*>(&id), sizeof(id));
+                ofs.write(reinterpret_cast<const char*>(&ts), sizeof(ts));
+            }
 			return true;
         }
 
@@ -220,6 +259,24 @@ namespace Quanta {
                 ifs.read(&text[0], len);
                 chunkMap[id] = text;
             }
+
+            // Read timestamps (backward-compatible: only read if data remains)
+            timestampMap_.clear();
+            if (ifs.peek() != EOF) {
+                size_t numTimestamps;
+                ifs.read(reinterpret_cast<char*>(&numTimestamps), sizeof(numTimestamps));
+                if (ifs.good()) {
+                    for (size_t i = 0; i < numTimestamps; ++i) {
+                        unsigned long long id;
+                        unsigned long long ts;
+                        ifs.read(reinterpret_cast<char*>(&id), sizeof(id));
+                        ifs.read(reinterpret_cast<char*>(&ts), sizeof(ts));
+                        if (ifs.good()) {
+                            timestampMap_[id] = ts;
+                        }
+                    }
+                }
+            }
 			return true;
         }
 		inline unsigned long long GetIdByIndex(unsigned long long index) const {
@@ -251,6 +308,7 @@ namespace Quanta {
         std::vector<unsigned long long> ids;                  // Record IDs.
         std::map<std::string, X::Value> paramMap;            // Parameters.
         std::map<unsigned long long, std::string> chunkMap;  // ID-to-text mapping.
+        std::map<unsigned long long, unsigned long long> timestampMap_;  // ID-to-timestamp (ms).
         mutable std::mutex mtx;  // Protects all member data for thread safety
     };
 
