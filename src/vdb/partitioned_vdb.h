@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include "xpackage.h"
+#include "scene_tracker.h"
 #include <map>
 #include <set>
 #include <numeric>
@@ -24,6 +25,7 @@ namespace Quanta
 
     class PartitionedVdb
     {
+        friend class SceneTracker;
         X::Value m_sqlite;
         X::Value m_configDb;
         // Config stored as map, synced to SQLite
@@ -70,6 +72,7 @@ namespace Quanta
         APISET().AddVarFunc("QueryLabelByID", &PartitionedVdb::QueryLabelByID);
         APISET().AddVarFunc("Grouping", &PartitionedVdb::Grouping);
         APISET().AddFunc<1>("GetPartitionInfo", &PartitionedVdb::GetPartitionInfo);
+        APISET().AddVarClass<SceneTracker, PartitionedVdb>("CreateTracker");
         END_PACKAGE
 
             PartitionedVdb(X::ARGS& params, X::KWARGS& kwParams);
@@ -92,6 +95,9 @@ namespace Quanta
         bool AddPartitionTag(int index, const std::string& tag);
         X::Value ListPartitions();
         X::Value GetPartitionInfo(const std::string& tag);
+
+        // Accessors for SceneTracker
+        int GetDimension() const { return dimension_; }
 
     private:
         void InitDatabase();
