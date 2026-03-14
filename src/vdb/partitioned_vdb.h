@@ -27,6 +27,9 @@ namespace Quanta
         std::atomic<long long> last_access_ms_{0};
         std::atomic<long long> last_save_ms_{0};
         std::atomic<bool> is_dirty_{false};
+        std::atomic<bool> is_historical_read_{false};
+        std::atomic<long long> ts_start_{0};
+        std::atomic<long long> ts_end_{0};
     };
 
     class PartitionedVdb
@@ -42,10 +45,11 @@ namespace Quanta
         std::string prefix_;
 
         // Cached config values
-        std::string tsGranularity_ = "monthly";
+        std::string tsGranularity_ = "hourly";
         int dimension_ = 512;
         std::string spaceName_ = "l2";
-        size_t maxElements_ = 100000;
+        float maxMemoryGb_ = 1.0f;
+        size_t maxElements_ = 500000;       // Dynamically calculated during Init
         int M_ = 16;
         int efConstruction_ = 200;
         int efSearch_ = 50;
@@ -53,6 +57,7 @@ namespace Quanta
         // Maintenance and TTL configuration
         long long ttl_minutes_ = 60;
         long long auto_save_seconds_ = 300;
+        int max_loaded_read_only_partitions_ = 50;
 
         // Concurrency
         mutable std::mutex partitions_mutex_;
@@ -83,7 +88,7 @@ namespace Quanta
     public:
         BEGIN_PACKAGE(PartitionedVdb)
             APISET().AddVarFunc("Init", &PartitionedVdb::Init);
-        APISET().AddFunc<1>("Save", &PartitionedVdb::Save);
+        APISET().AddFunc<0>("Close", &PartitionedVdb::Close);
         APISET().AddFunc<1>("Load", &PartitionedVdb::Load);
         APISET().AddVarFunc("AddVectors", &PartitionedVdb::AddVectors);
         APISET().AddVarFunc("Lookup", &PartitionedVdb::Lookup);
@@ -101,6 +106,7 @@ namespace Quanta
         bool Init(X::XRuntime* rt, X::XObj* pContext,
             X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
 
+        bool Close();
         bool Save(const std::string& path);
         bool Load(const std::string& path);
 
@@ -151,11 +157,12 @@ namespace Quanta
 
         Partition* GetOrCreatePartition(const std::string& tsPartition, int customIndex);
         Partition* LoadPartition(const std::string& key);
+        bool SavePartition(Partition* p, const std::string& key);
 
         // File path helpers
         fs::path GetDbPath();
-        fs::path GetHnswPath(const std::string& tsPartition, int customIndex);
-        fs::path GetVdbPath(const std::string& tsPartition, int customIndex);
+        fs::path GetHnswPath(const std::string& tsPartition, int customIndex, const std::string& bucketStr);
+        fs::path GetVdbPath(const std::string& tsPartition, int customIndex, const std::string& bucketStr);
 
         // Grouping helpers
         std::string ResolveItemPartitionKey(

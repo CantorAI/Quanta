@@ -66,7 +66,7 @@ Add one or more vectors with metadata.
 | `id` | int or list | External ID(s) — single int for one vector, list for batch |
 | `embedding` | numpy array | Float32 array, shape `(dim,)` for single or `(n*dim,)` for batch |
 | `timestamp` | int (kwarg) | Millisecond timestamp (e.g. `int(time.time()*1000)`) |
-| `partition` | str (kwarg) | Custom partition tag (default: `"default"`) |
+| `partition` | str (kwarg) | Custom partition tag (**MANDATORY** for high-density IPCs, e.g. `"cam_01"`) |
 | `chunks` | str or list (kwarg) | Text label(s) stored with each vector |
 | `num_threads` | int (kwarg) | Thread count for HNSW insertion (-1 = auto) |
 
@@ -130,13 +130,13 @@ results = vdb.Lookup(query, 10, dedup=0.95)
 
 ---
 
-### `Save(path)` / `Load(path)`
+### `Close()` / `Load(path)`
 
-Manage database metadata and config. Quanta is fully autonomous when running — vectors are **lazy-loaded** into RAM only when their specific time partition is queried or written to, guaranteeing instant `Load()` times. 
+Manage database metadata and config safely. Quanta is fully autonomous when running — vectors are **lazy-loaded** into RAM only when explicitly searched. The Background Maintenance Thread automatically saves active buffers to disk every `auto_save_seconds`.
 
 ```python
-# Save currently loaded metadata mapping and force-flush all dirty partitions 
-vdb.Save("")
+# Gracefully signal the background thread to safely flush all remaining unwritten data to disk before process death
+vdb.Close()
 
 # Load into a new instance (Config+Tags only — vectors are NOT immediately loaded to RAM)
 vdb2 = quanta.partitioned_vdb(prefix="my_vdb", path="./data/vectors", dim=512)
@@ -273,7 +273,7 @@ for i, path in enumerate(image_paths):
         timestamp=int(os.path.getmtime(path) * 1000),
         chunks=os.path.basename(path)
     )
-vdb.Save("")
+vdb.Close()
 
 # Search by text
 results = vdb.Lookup(text_to_embedding("a red car"), 5)
@@ -296,9 +296,10 @@ results = vdb.Lookup(text_to_embedding("person"), 5,
 | `prefix` | `"vdb"` | Filename prefix for all persisted files |
 | `path` | `"."` | Base directory for storage |
 | `dim` / `dimension` | `512` | Embedding vector dimension |
-| `granularity` | `"monthly"` | Time bucketing: `hourly`, `daily`, `weekly`, `monthly`, `yearly` |
+| `granularity` | `"hourly"` | Time bucketing: `hourly`, `daily`, `weekly`, `monthly`, `yearly` |
 | `space` | `"l2"` | Distance metric: `l2`, `ip` (inner product), `cosine` |
-| `max_elements` | `100000` | Max vectors per HNSW partition |
+| `max_memory_gb` | `1.0` | Peak memory allowance per partition graph |
+| `max_loaded_read_only_partitions` | `50` | LRU Eviction Quota: Maximum historical query graphs allowed in memory |
 | `ttl_minutes` | `60` | Idle time before a partition is autonomously offloaded from RAM |
 | `auto_save_seconds`| `300` | Autonomous background thread save interval (seconds) |
 | `M` | `16` | HNSW graph connectivity |
@@ -307,13 +308,19 @@ results = vdb.Lookup(text_to_embedding("person"), 5,
 
 ---
 
-## 🧠 Memory Management (Autonomous TTL Cache)
+## 🧠 Memory Management (Autonomous Safeties)
 
-Quanta `PartitionedVdb` natively prevents gigabyte-scale memory leaks during continuous IPC ingestion via a highly optimized C++ **Maintenance Thread**. 
+Quanta `PartitionedVdb` implements extreme Memory Swapping safeguards allowing standard servers to securely ingest thousands of vectors per second globally without risking RAM crashes.
 
-- **Dirty Partitions**: Vectors are safely appended entirely in RAM. Every `auto_save_seconds` (default: 5 minutes), the background thread will gracefully write new chunks to the disk database without pausing the active application.
-- **Time-To-Live (TTL)**: To prevent massive "step-like" HNSW graph RAM retention, each partition tracks its `last_access_time`. If an older partition is not written or queried for `ttl_minutes` (default: 1 hour), it is instantly dumped from RAM, securing peak memory strictly to active camera days.
-- **Cache Misses**: If an offloaded partition is struck by a new query (e.g. searching yesterday's database), it is instantly rehydrated via lazy-loading and its TTL resets.
+### Tier 3 Byte Spilling (The `max_memory_gb` Limit)
+The `max_memory_gb` parameter creates a strict capacity ceiling. When the user ingests thousands of frames, Quanta translates the user's byte limit dynamically based on the dataset's embedding dimensions. 
+If an active bucket crosses this byte limit, Quanta automatically seals `_0000.hnsw` completely autonomously, saves the bounding SQLite timestamp map to `vision_manifest.db`, and opens `_0001.hnsw`. 
+- **User Impact:** Even 100 parallel IPC cameras logging huge traffic spikes are structurally protected from ever overloading server memory allocations natively.
+
+### Auto-Cleanup (TTL) and LRU Quotas
+- **Time-To-Live (TTL)**: Actively writing buckets are instantly cleared if idle without queries for `ttl_minutes` (default: 60 minutes), strictly capping peak ingress RAM to immediate camera hours.
+- **LRU Read-Only Eviction**: If a cross-month global forensic search forces hundreds of historical graph hydrations, they are strictly throttled by the `max_loaded_read_only_partitions` sandbox (Default: 50 limit). The engine enforces LRU (Least-Recently-Used) swapping upon historical files synchronously with disk loads, securing the engine against query spikes.
+- **Dirty Partitions**: You never call `vdb.Save()`. Every `auto_save_seconds`, a C++ thread pushes pending ingestion data seamlessly. Call `vdb.Close()` for safe shutdown.
 
 ---
 

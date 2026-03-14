@@ -1,4 +1,4 @@
-﻿#ifndef VECTOR_DATABASE_H
+#ifndef VECTOR_DATABASE_H
 #define VECTOR_DATABASE_H
 
 #include <vector>
@@ -303,6 +303,10 @@ namespace Quanta {
 			}
 			return std::string();
 		}   
+        inline size_t GetSize() const {
+            std::lock_guard<std::mutex> lock(mtx);
+            return ids.size();
+        }
     private:
         int D;  // Dimension of each vector.
         std::vector<unsigned long long> ids;                  // Record IDs.
