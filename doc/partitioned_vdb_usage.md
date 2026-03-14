@@ -132,20 +132,17 @@ results = vdb.Lookup(query, 10, dedup=0.95)
 
 ### `Save(path)` / `Load(path)`
 
-Persist and restore the entire VDB (index + metadata + timestamps).
+Manage database metadata and config. Quanta is fully autonomous when running — vectors are **lazy-loaded** into RAM only when their specific time partition is queried or written to, guaranteeing instant `Load()` times. 
 
 ```python
-# Save (empty string = use current basePath)
+# Save currently loaded metadata mapping and force-flush all dirty partitions 
 vdb.Save("")
 
-# Save to a specific path
-vdb.Save("/backup/vectors")
-
-# Load into a new instance
+# Load into a new instance (Config+Tags only — vectors are NOT immediately loaded to RAM)
 vdb2 = quanta.partitioned_vdb(prefix="my_vdb", path="./data/vectors", dim=512)
 vdb2.Load("./data/vectors")
 
-# Now vdb2 has all the data, including timestamps
+# Now vdb2 has all the config. When queried, it will lazy-load the required partition from disk.
 results = vdb2.Lookup(query, 5)
 ```
 
@@ -302,9 +299,21 @@ results = vdb.Lookup(text_to_embedding("person"), 5,
 | `granularity` | `"monthly"` | Time bucketing: `hourly`, `daily`, `weekly`, `monthly`, `yearly` |
 | `space` | `"l2"` | Distance metric: `l2`, `ip` (inner product), `cosine` |
 | `max_elements` | `100000` | Max vectors per HNSW partition |
+| `ttl_minutes` | `60` | Idle time before a partition is autonomously offloaded from RAM |
+| `auto_save_seconds`| `300` | Autonomous background thread save interval (seconds) |
 | `M` | `16` | HNSW graph connectivity |
 | `ef_construction` | `200` | HNSW build-time search depth |
 | `ef_search` | `50` | HNSW query-time search depth |
+
+---
+
+## 🧠 Memory Management (Autonomous TTL Cache)
+
+Quanta `PartitionedVdb` natively prevents gigabyte-scale memory leaks during continuous IPC ingestion via a highly optimized C++ **Maintenance Thread**. 
+
+- **Dirty Partitions**: Vectors are safely appended entirely in RAM. Every `auto_save_seconds` (default: 5 minutes), the background thread will gracefully write new chunks to the disk database without pausing the active application.
+- **Time-To-Live (TTL)**: To prevent massive "step-like" HNSW graph RAM retention, each partition tracks its `last_access_time`. If an older partition is not written or queried for `ttl_minutes` (default: 1 hour), it is instantly dumped from RAM, securing peak memory strictly to active camera days.
+- **Cache Misses**: If an offloaded partition is struck by a new query (e.g. searching yesterday's database), it is instantly rehydrated via lazy-loading and its TTL resets.
 
 ---
 

@@ -5,6 +5,8 @@
 #include <functional>
 #include "HnswVdb.h"
 #include "VectorDatabase.h"
+#include <chrono>
+#include "QuantaHost.h"
 
 namespace Quanta
 {
@@ -106,6 +108,24 @@ namespace Quanta
 
     PartitionedVdb::~PartitionedVdb()
     {
+        stop_thread_ = true;
+        if (maintenance_thread_.joinable()) {
+            maintenance_thread_.join();
+        }
+
+        std::lock_guard<std::mutex> lock(partitions_mutex_);
+        // Ensure dirty partitions are saved on teardown
+        for (auto& [key, partition] : partitions_) {
+            if (partition->is_dirty_) {
+                size_t pos = key.rfind('_');
+                if (pos != std::string::npos) {
+                    std::string tsPartition = key.substr(0, pos);
+                    int customIndex = std::stoi(key.substr(pos + 1));
+                    partition->vdb->Save(GetVdbPath(tsPartition, customIndex).string());
+                    partition->index->Save(GetHnswPath(tsPartition, customIndex).string());
+                }
+            }
+        }
         partitions_.clear();
     }
 
@@ -135,6 +155,8 @@ namespace Quanta
         efConstruction_ = std::stoi(GetConfig("ef_construction", "200"));
         efSearch_ = std::stoi(GetConfig("ef_search", "50"));
         nextCustomIndex_ = std::stoi(GetConfig("next_custom_index", "1"));
+        ttl_minutes_ = std::stoll(GetConfig("ttl_minutes", "60"));
+        auto_save_seconds_ = std::stoll(GetConfig("auto_save_seconds", "300"));
     }
 
     void PartitionedVdb::UpdateConfigFromMembers()
@@ -148,6 +170,8 @@ namespace Quanta
         SetConfig("ef_construction", std::to_string(efConstruction_));
         SetConfig("ef_search", std::to_string(efSearch_));
         SetConfig("next_custom_index", std::to_string(nextCustomIndex_));
+        SetConfig("ttl_minutes", std::to_string(ttl_minutes_));
+        SetConfig("auto_save_seconds", std::to_string(auto_save_seconds_));
     }
 
     // ============================================================================
@@ -464,8 +488,13 @@ namespace Quanta
     {
         std::string key = tsPartition + "_" + std::to_string(customIndex);
 
+        long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+        std::lock_guard<std::mutex> lock(partitions_mutex_);
         auto it = partitions_.find(key);
         if (it != partitions_.end()) {
+            it->second->last_access_ms_ = now_ms;
             return it->second.get();
         }
 
@@ -474,6 +503,9 @@ namespace Quanta
         partition->index = std::make_unique<HnswVdb>(
             spaceName_, dimension_, maxElements_, M_, efConstruction_, efSearch_);
 
+        partition->last_access_ms_ = now_ms;
+        partition->last_save_ms_ = now_ms;
+
         Partition* ptr = partition.get();
         partitions_[key] = std::move(partition);
         return ptr;
@@ -481,8 +513,13 @@ namespace Quanta
 
     Partition* PartitionedVdb::LoadPartition(const std::string& key)
     {
+        long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+        std::lock_guard<std::mutex> lock(partitions_mutex_);
         auto it = partitions_.find(key);
         if (it != partitions_.end()) {
+            it->second->last_access_ms_ = now_ms;
             return it->second.get();
         }
 
@@ -506,6 +543,9 @@ namespace Quanta
         partition->index = std::make_unique<HnswVdb>(
             spaceName_, dimension_, maxElements_, M_, efConstruction_, efSearch_);
         partition->index->Load(hnswPath.string());
+
+        partition->last_access_ms_ = now_ms;
+        partition->last_save_ms_ = now_ms;
 
         Partition* ptr = partition.get();
         partitions_[key] = std::move(partition);
@@ -633,6 +673,8 @@ namespace Quanta
         parseParam("M", "16");
         parseParam("ef_construction", "200");
         parseParam("ef_search", "50");
+        parseParam("ttl_minutes", "60");
+        parseParam("auto_save_seconds", "300");
         SetConfig("next_custom_index", "1");
 
         // Handle dim as alias for dimension
@@ -667,6 +709,8 @@ namespace Quanta
                 SyncConfigToDB();
             }
         }
+
+        StartMaintenanceThread();
 
         retValue = X::Value(true);
         return true;
@@ -727,6 +771,8 @@ namespace Quanta
         }
 
         size_t n = totalCount / dimension_;
+        total_add_vectors_ += n;
+        
         const float* rawPtr = reinterpret_cast<const float*>(vecT->GetData());
 
         // Build external IDs
@@ -773,6 +819,8 @@ namespace Quanta
         std::vector<unsigned long long> recIdx = partition->vdb->AddLabels(extIds, chunkTexts, static_cast<unsigned long long>(timestampMs));
         partition->index->AddVectors(recIdx, rawPtr, totalCount, numThreads);
         partition->count += n;
+        partition->is_dirty_ = true;
+        partition->is_dirty_ = true;
 
         retValue = X::Value(static_cast<long long>(extIds[n - 1]));
     }
@@ -908,6 +956,7 @@ namespace Quanta
     void PartitionedVdb::Lookup(X::XRuntime* rt, X::XObj* pContext,
         X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
     {
+        total_lookups_++;
         if (params.size() < 2) {
             retValue = X::Value();
             return;
@@ -1045,7 +1094,10 @@ namespace Quanta
 
         // Return top K (5-element tuples: id, score, chunk, key, timestamp_ms)
         X::List resultList;
-        size_t count = std::min(static_cast<size_t>(topK), allResults.size());
+        size_t count = static_cast<size_t>(topK);
+        if (allResults.size() < count) {
+            count = allResults.size();
+        }
         for (size_t i = 0; i < count; ++i) {
             auto& r = allResults[i];
             X::List item;
@@ -1375,6 +1427,7 @@ namespace Quanta
         X::XObj* pContext, X::ARGS& params,
         X::KWARGS& kwParams, X::Value& retValue)
     {
+        total_grouping_++;
         // params[0] = combined list of dicts (all candidates, VDB + SQL merged)
         // params[1] = threshold (float)
         if (params.size() < 2) {
@@ -1521,6 +1574,99 @@ namespace Quanta
         info["tags"] = tags;
 
         return info;
+    }
+
+    // ============================================================================
+    // Maintenance Thread Logic
+    // ============================================================================
+
+    void PartitionedVdb::StartMaintenanceThread()
+    {
+        maintenance_thread_ = std::thread(&PartitionedVdb::MaintenanceLoop, this);
+    }
+
+    void PartitionedVdb::MaintenanceLoop()
+    {
+        X::Value cantor = QuantaHost::I().GetCantor();
+        while (!stop_thread_) {
+            // Sleep for small intervals to allow fast shutdown
+            for (int i = 0; i < 50 && !stop_thread_; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 5s loop total
+            }
+            if (stop_thread_) break;
+
+            long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+
+            long long loaded_partitions = 0;
+            long long memory_vectors = 0;
+            long long dirty_partitions = 0;
+
+            std::lock_guard<std::mutex> lock(partitions_mutex_);
+            for (auto it = partitions_.begin(); it != partitions_.end(); ) {
+                auto& partition = it->second;
+                bool erased = false;
+                
+                size_t pos = it->first.rfind('_');
+                if (pos == std::string::npos) {
+                    ++it;
+                    continue;
+                }
+                std::string tsPartition = it->first.substr(0, pos);
+                int customIndex = std::stoi(it->first.substr(pos + 1));
+
+                // 1. Time-To-Live Eviction: Unload from RAM if idle
+                long long idle_time_ms = now_ms - partition->last_access_ms_;
+                if (ttl_minutes_ > 0 && idle_time_ms > (ttl_minutes_ * 60000LL)) {
+                    // Save first before dropping
+                    if (partition->is_dirty_) {
+                        partition->vdb->Save(GetVdbPath(tsPartition, customIndex).string());
+                        partition->index->Save(GetHnswPath(tsPartition, customIndex).string());
+                    }
+                    it = partitions_.erase(it);
+                    erased = true;
+                }
+                
+                // 2. Auto-save if it's dirty and has exceeded the auto-save threshold
+                if (!erased && partition->is_dirty_ && auto_save_seconds_ > 0) {
+                    long long dirty_age_ms = now_ms - partition->last_save_ms_;
+                    if (dirty_age_ms > (auto_save_seconds_ * 1000LL)) {
+                        partition->vdb->Save(GetVdbPath(tsPartition, customIndex).string());
+                        partition->index->Save(GetHnswPath(tsPartition, customIndex).string());
+                        partition->is_dirty_ = false;
+                        partition->last_save_ms_ = now_ms;
+                    }
+                }
+
+                if (!erased) {
+                    loaded_partitions++;
+                    if (partition) {
+                        memory_vectors += partition->count;
+                        if (partition->is_dirty_) {
+                            dirty_partitions++;
+                        }
+                    }
+                    ++it;
+                }
+            }
+            // Mute unlock happens here when lock goes out of scope
+
+            // 3. Metrics Reporting
+            X::Value cantor = QuantaHost::I().GetCantor();
+            if (cantor.IsObject()) {
+                X::Value metrics = cantor["Metrics"]();
+                std::string namespace_name = "PartitionedVdb_" + basePath_.filename().string();
+                
+                metrics["SetWordBook"](namespace_name, "LoadedPartitions", X::Value(loaded_partitions));
+                metrics["SetWordBook"](namespace_name, "MemoryVectors", X::Value(memory_vectors));
+                metrics["SetWordBook"](namespace_name, "DirtyPartitions", X::Value(dirty_partitions));
+                
+                metrics["SetWordBook"](namespace_name, "TotalLookups", X::Value((long long)total_lookups_));
+                metrics["SetWordBook"](namespace_name, "TotalAddVectors", X::Value((long long)total_add_vectors_));
+                metrics["SetWordBook"](namespace_name, "TotalGroupings", X::Value((long long)total_grouping_));
+            }
+
+        }
     }
 
 } // namespace Quanta

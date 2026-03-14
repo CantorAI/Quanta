@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "xpackage.h"
 #include "scene_tracker.h"
 #include <map>
@@ -6,6 +6,9 @@
 #include <numeric>
 #include <memory>
 #include <filesystem>
+#include <thread>
+#include <mutex>
+#include <atomic>
 
 
 
@@ -21,6 +24,9 @@ namespace Quanta
         std::unique_ptr<HnswVdb> index;
         std::unique_ptr<VectorDatabase> vdb;
         size_t count = 0;
+        std::atomic<long long> last_access_ms_{0};
+        std::atomic<long long> last_save_ms_{0};
+        std::atomic<bool> is_dirty_{false};
     };
 
     class PartitionedVdb
@@ -43,6 +49,20 @@ namespace Quanta
         int M_ = 16;
         int efConstruction_ = 200;
         int efSearch_ = 50;
+
+        // Maintenance and TTL configuration
+        long long ttl_minutes_ = 60;
+        long long auto_save_seconds_ = 300;
+
+        // Concurrency
+        mutable std::mutex partitions_mutex_;
+        std::thread maintenance_thread_;
+        std::atomic<bool> stop_thread_{false};
+
+        // Metrics Tracking
+        std::atomic<long long> total_lookups_{0};
+        std::atomic<long long> total_add_vectors_{0};
+        std::atomic<long long> total_grouping_{0};
 
         // Custom partitions: index -> tags
         std::map<int, std::set<std::string>> customPartitionTags_;
@@ -100,6 +120,9 @@ namespace Quanta
         int GetDimension() const { return dimension_; }
 
     private:
+        void MaintenanceLoop();
+        void StartMaintenanceThread();
+
         void InitDatabase();
         void SyncConfigToDB();
         void LoadConfigFromDB();

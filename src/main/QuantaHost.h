@@ -60,6 +60,8 @@ namespace Quanta
             APISET().AddFunc<0>("Test", &QuantaHost::Test);
         END_PACKAGE
 
+        inline X::Value GetCantor() { return m_cantor; }
+
         inline long long GetContentSize()
         {
             return sizeof(m_cantor);
