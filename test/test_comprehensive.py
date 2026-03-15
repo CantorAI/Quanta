@@ -46,6 +46,9 @@ def run_tests():
         vdb.AddVectors(b*1000, vnp, chunks=[f"chunk_{b}_{i}"]*1000, timestamp=ts, partition="CAM_1")
         print(f"Batch {b} inserted successfully.")
 
+    print("Waiting for WAL Background Thread to flush micro-batches...")
+    time.sleep(1.0)
+    
     print("Closing VDB to flush buckets...")
     vdb.Close()
     print("VDB closed successfully.")

@@ -49,7 +49,25 @@ Even with Time and Device partitioning, unexpected vector surges could still bre
 
 ---
 
-## 4. The Autonomous Maintenance Thread (Memory Defense)
+## 4. Write-Ahead Log (WAL) Async Merging Pipeline
+To prevent data loss during high-density video ingress while ensuring instantaneous `Lookup()` performance, `PartitionedVdb` employs an isolated Write-Ahead Log queue.
+
+### A. The Synchronous Fast-Path
+When `AddVectors()` executes, incoming floats are inserted into the live RAM structures but physically bypassed from synchronous graph compilation. Instead, the raw vectors are binary-appended to a microscopic `[bucket_prefix].wal_[timestamp]` file.
+- **Aggressive Rotation**: After an extremely small threshold (e.g., 100 vectors), the active `.wal` is sealed, and its filename is dispatched to an **In-Memory Thread Queue**. The system immediately spawns a new chronologically-named file for the next write.
+
+### B. Parallelized Background Graph Compilation
+The Quanta maintenance thread actively monitors the in-memory array for mature `.wal` filenames. 
+1. When a `.wal` matures, the thread pops the file, parses the records, and structurally builds the `.hnsw` graph arrays in the background.
+2. **Multi-Threading**: This build process takes advantage of parallel multiprocessing (`omp` / `num_threads`), drastically reducing serialization time.
+3. Once constructed, the `.hnsw` and `.vdb` layers are written via secure atomic `.tmp` renames, and the consumed `.wal` is permanently deleted.
+
+### C. Boot-Time Crash Recovery
+If a hard crash obliterates the RAM queues, `Init()` scans the directory, locates orphaned `.wal_*` micro-batches, strictly orders them by timestamp, and forces structural hydration before the IPC pipelines are permitted to open.
+
+---
+
+## 5. The Autonomous Maintenance Thread (Memory Defense)
 Because Quanta operates globally over the lifetime of the server, it features an embedded C++ `std::thread` that loops continuously every 5 seconds, acting as its immune system.
 
 ### A. Auto-Save (The Dirty Buffer)
@@ -63,7 +81,7 @@ While `Lazy Loading` defends against OOM crashes during boot sequences, the TTL 
 
 ---
 
-## 5. Query Scalability: Overload RAM Throttling (Read-Only Swapping)
+## 6. Query Scalability: Overload RAM Throttling (Read-Only Swapping)
 The TTL Cache perfectly protects the database during standard write operations by dumping stale data past 1 hour. But it does **NOT** protect the system from massive query attacks.
 
 If a single API request asks to search "the last 3 months" of data across 32 cameras, Quanta would be forced to rapidly load **thousands** of `.hnsw` files into RAM simultaneously to serve the concurrent search. This would instantly shatter the 64GB RAM limits, crashing the server entirely.
@@ -79,7 +97,7 @@ To defeat Query-Spike OOMs without killing wide-scale deployments, Quanta introd
 
 ---
 
-## 6. Summary of Physical Disk Artifacts
+## 7. Summary of Physical Disk Artifacts
 Under the finalized `Prefix_Time_Index_Bucket` structure, a standard write will produce the following synchronized binaries on solid-state media:
 
 ```text

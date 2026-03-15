@@ -184,6 +184,18 @@ namespace Quanta {
                 max_elements_);
         }
 
+        /// Dynamically resize the maximum allowed elements in the graph
+        void Resize(size_t new_max_elements) {
+            if (new_max_elements > max_elements_) {
+                appr_alg_->resizeIndex(new_max_elements);
+                max_elements_ = new_max_elements;
+            }
+        }
+
+        size_t GetMaxElements() const {
+            return max_elements_;
+        }
+
     private:
         std::string space_name_;
         int         dim_;

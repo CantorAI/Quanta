@@ -9,6 +9,8 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <queue>
+#include <condition_variable>
 
 
 
@@ -16,8 +18,18 @@
 namespace Quanta
 {
     namespace fs = std::filesystem;
-        class HnswVdb;
-        class VectorDatabase;
+    class HnswVdb;
+    class VectorDatabase;
+
+    // WAL Binary Record Format
+    // We write [WalRecordHeader] + [vector_floats...] + [chunk_text_bytes]
+    #pragma pack(push, 1)
+    struct WalRecordHeader {
+        unsigned long long external_id;
+        unsigned long long timestamp_ms;
+        unsigned int chunk_text_length;
+    };
+    #pragma pack(pop)
 
     // Single partition: index + database
     struct Partition {
@@ -26,10 +38,15 @@ namespace Quanta
         size_t count = 0;
         std::atomic<long long> last_access_ms_{0};
         std::atomic<long long> last_save_ms_{0};
+        std::string key_;
         std::atomic<bool> is_dirty_{false};
         std::atomic<bool> is_historical_read_{false};
         std::atomic<long long> ts_start_{0};
         std::atomic<long long> ts_end_{0};
+        
+        // WAL Tracking per Partition
+        std::string active_wal_filename_;       // Current file being appended to
+        int active_wal_record_count_ = 0;       // Number of vectors in the active file
     };
 
     class PartitionedVdb
@@ -60,22 +77,30 @@ namespace Quanta
         int max_loaded_read_only_partitions_ = 50;
 
         // Concurrency
-        mutable std::mutex partitions_mutex_;
+        mutable std::recursive_mutex partitions_mutex_;
         std::thread maintenance_thread_;
         std::atomic<bool> stop_thread_{false};
+
+        // WAL Maintenance Concurrency
+        std::queue<std::string> pending_wals_;
+        std::mutex wals_mutex_;
+        std::condition_variable wals_cv_;
+        int wal_rotation_threshold_ = 100; // Micro-batch size
 
         // Metrics Tracking
         std::atomic<long long> total_lookups_{0};
         std::atomic<long long> total_add_vectors_{0};
         std::atomic<long long> total_grouping_{0};
-
+        std::atomic<long long> total_buckets_{0};
+        std::atomic<long long> total_wals_processed_{0};
+        std::atomic<long long> total_wal_vectors_merged_{0};
         // Custom partitions: index -> tags
         std::map<int, std::set<std::string>> customPartitionTags_;
         std::map<std::string, int> tagToIndex_;
         int nextCustomIndex_ = 1;  // 0 = "default"
 
         // Loaded partitions: "2024-01_0" -> Partition
-        std::map<std::string, std::unique_ptr<Partition>> partitions_;
+        std::map<std::string, std::shared_ptr<Partition>> partitions_;
 
         // Type aliases used by the Grouping helpers
         struct GroupingItem {
@@ -128,6 +153,8 @@ namespace Quanta
     private:
         void MaintenanceLoop();
         void StartMaintenanceThread();
+        void ProcessWalFile(const std::string& unmerged_wal);
+        void ProcessWalFileBuffer(const std::string& target_key, const std::vector<char>& buffer);
 
         void InitDatabase();
         void SyncConfigToDB();
@@ -155,14 +182,12 @@ namespace Quanta
             long long tsStartMs, long long tsEndMs,
             const std::set<int>& customIndices);
 
-        Partition* GetOrCreatePartition(const std::string& tsPartition, int customIndex);
-        Partition* LoadPartition(const std::string& key);
-        bool SavePartition(Partition* p, const std::string& key);
+        std::shared_ptr<Partition> GetOrCreatePartition(const std::string& tsPartition, int customIndex);
+        std::shared_ptr<Partition> LoadPartition(const std::string& key);
+        bool SavePartition(std::shared_ptr<Partition> p, const std::string& key);
 
         // File path helpers
         fs::path GetDbPath();
-        fs::path GetHnswPath(const std::string& tsPartition, int customIndex, const std::string& bucketStr);
-        fs::path GetVdbPath(const std::string& tsPartition, int customIndex, const std::string& bucketStr);
 
         // Grouping helpers
         std::string ResolveItemPartitionKey(

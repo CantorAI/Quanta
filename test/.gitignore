@@ -1,0 +1,14 @@
+data/
+test_lrpc/
+test_pvdb/
+test_pvdb_debug/
+test_pvdb_full/
+*.db
+*.db-shm
+*.db-wal
+*.hnsw
+*.vdb
+*.wal*
+*.log
+trace.txt
+crash_trace.log
