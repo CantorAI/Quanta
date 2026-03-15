@@ -613,12 +613,10 @@ namespace Quanta
         long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
-
-        std::lock_guard<std::recursive_mutex> lock(partitions_mutex_);
+        std::unique_lock<std::recursive_mutex> lock(partitions_mutex_);
 
         auto it = partitions_.find(key);
         if (it != partitions_.end()) {
-
             it->second->last_access_ms_ = now_ms;
             return it->second;
         }
@@ -654,22 +652,35 @@ namespace Quanta
 
 
         if (!fs::exists(hnswPath) || !fs::exists(vdbPath)) {
-
             return nullptr;
         }
 
-
+        // Pre-allocate the partition and insert it to prevent concurrent loads
         auto partition = std::make_shared<Partition>();
         partition->vdb = std::make_unique<VectorDatabase>(dimension_);
-
-        partition->vdb->Load(vdbPath.string());
-
-
         partition->index = std::make_unique<HnswVdb>(
             spaceName_, dimension_, maxElements_, M_, efConstruction_, efSearch_);
             
+        partition->key_ = key;
+        partition->last_access_ms_ = now_ms;
+        partition->last_save_ms_ = now_ms;
+        
+        // Temporarily store empty partition in map
+        partitions_[key] = partition;
 
+        // ==========================================================
+        // RELEASE GLOBAL MUTEX DURING MASSIVE DISK I/O
+        // ==========================================================
+        lock.unlock();
+
+        partition->vdb->Load(vdbPath.string());
         partition->index->Load(hnswPath.string());
+        
+        lock.lock();
+        // ==========================================================
+        // REAQUIRE MUTEX FOR METADATA FINALIZATION
+        // ==========================================================
+
         partition->count = partition->vdb->GetSize();
         partition->is_historical_read_ = true; // explicitly mark as read-only historical
         
@@ -684,13 +695,6 @@ namespace Quanta
                 partition->ts_end_ = stat["get"](1).ToLongLong();
             }
         }
-
-        partition->key_ = key;
-        partition->last_access_ms_ = now_ms;
-        partition->last_save_ms_ = now_ms;
-
-
-        partitions_[key] = std::move(partition);
 
         return partitions_[key];
     }
@@ -1237,53 +1241,56 @@ namespace Quanta
             return;
         }
 
-        // Query each partition
+        // Query each partition concurrently exploiting OpenMP and unlocked disk I/O
         // Results: id, score, chunk_text, partition_key, timestamp_ms
         std::vector<std::tuple<unsigned long long, float, std::string, std::string, unsigned long long>> allResults;
+        std::mutex results_mutex;
 
-        for (const auto& key : matchingKeys) {
-            std::shared_ptr<Quanta::Partition> pPart = partitions_.count(key) ?
-                partitions_[key] : LoadPartition(key);
+#pragma omp parallel for
+        for (long long kIdx = 0; kIdx < static_cast<long long>(matchingKeys.size()); ++kIdx) {
+            const auto& key = matchingKeys[kIdx];
+            
+            std::shared_ptr<Quanta::Partition> pPart = nullptr;
+            {
+                std::unique_lock<std::recursive_mutex> glock(partitions_mutex_);
+                pPart = partitions_.count(key) ? partitions_[key] : nullptr;
+            }
+            if (!pPart) {
+                pPart = LoadPartition(key);
+            }
 
             if (!pPart) {
-
                 continue;
             }
 
-
             auto results = pPart->index->Lookup(query, topK);
-
 
             // Dedup within this partition if enabled
             if (dedupThreshold > 0.0f && results.size() > 1) {
 
-                // Fetch vectors for all results in parallel
+                // Fetch vectors for all results (parallel natively inside dedup)
                 std::vector<std::vector<float>> vectors(results.size());
 
-#pragma omp parallel for
                 for (long long i = 0; i < static_cast<long long>(results.size()); ++i) {
                     vectors[i] = pPart->index->GetVectorById(results[i].first);
                 }
                 
-
-
                 // Get deduplicated indices
                 std::vector<size_t> keptIndices = dedup_results(
                     results, vectors, dimension_, dedupThreshold);
 
-
-
                 // Add only kept results
+                std::lock_guard<std::mutex> rLock(results_mutex);
                 for (size_t idx : keptIndices) {
                     unsigned long long extId = pPart->vdb->GetIdByIndex(results[idx].first);
                     std::string text = pPart->vdb->GetTextById(extId);
                     unsigned long long tsMs = pPart->vdb->GetTimestampById(extId);
                     allResults.emplace_back(extId, results[idx].second, text, key, tsMs);
                 }
-
             }
             else {
                 // No dedup - add all results
+                std::lock_guard<std::mutex> rLock(results_mutex);
                 for (const auto& [internalIdx, score] : results) {
                     unsigned long long extId = pPart->vdb->GetIdByIndex(internalIdx);
                     std::string text = pPart->vdb->GetTextById(extId);
