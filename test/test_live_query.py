@@ -44,7 +44,7 @@ def main():
         print(f"  -> dynamically resolved path: {db_path}")
 
         # Mount the engine-hosted VDB explicitly by path inside Cantor's process natively
-        vdb = quanta.partitioned_vdb(
+        vdb = quanta.GetPartitionedVdb(
             prefix="clip",
             path=db_path,
             dim=512,

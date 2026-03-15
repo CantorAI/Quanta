@@ -24,6 +24,9 @@ namespace Quanta
         X::Value m_log;
         UID m_nodeId;
 
+        std::mutex m_vdbMutex;
+        std::map<std::string, X::Value> m_vdbInstances;
+
         std::string GetNodeIdString()
         {
             if (!m_cantor.IsObject())
@@ -50,6 +53,7 @@ namespace Quanta
             APISET().AddClass<0, DfsEngine>("dfs");
             APISET().AddVarClass<Vdb>("vdb");
             APISET().AddVarClass<PartitionedVdb>("partitioned_vdb");
+            APISET().AddVarFunc("GetPartitionedVdb", &QuantaHost::GetPartitionedVdb);
             APISET().AddFunc<1>("SetCantor", &QuantaHost::SetCantor);
             APISET().AddPropL("cantor",
                 [](auto* pThis, X::Value v)
@@ -67,6 +71,8 @@ namespace Quanta
             return sizeof(m_cantor);
         }
         void Test();
+        bool GetPartitionedVdb(X::XRuntime* rt, X::XObj* pContext,
+            X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
         inline X::XRuntime* RT() { return m_defaultRuntime; }
 
 		inline void SetDefaultRuntime(X::XRuntime* rt)

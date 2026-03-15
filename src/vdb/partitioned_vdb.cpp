@@ -1241,15 +1241,14 @@ namespace Quanta
             return;
         }
 
-        // Query each partition concurrently exploiting OpenMP and unlocked disk I/O
         // Results: id, score, chunk_text, partition_key, timestamp_ms
         std::vector<std::tuple<unsigned long long, float, std::string, std::string, unsigned long long>> allResults;
-        std::mutex results_mutex;
 
-#pragma omp parallel for
-        for (long long kIdx = 0; kIdx < static_cast<long long>(matchingKeys.size()); ++kIdx) {
-            const auto& key = matchingKeys[kIdx];
-            
+        // 1. Sequentially load partitions to prevent massive I/O disk thrashing
+        std::vector<std::pair<std::string, std::shared_ptr<Quanta::Partition>>> activePartitions;
+        activePartitions.reserve(matchingKeys.size());
+
+        for (const auto& key : matchingKeys) {
             std::shared_ptr<Quanta::Partition> pPart = nullptr;
             {
                 std::unique_lock<std::recursive_mutex> glock(partitions_mutex_);
@@ -1258,10 +1257,18 @@ namespace Quanta
             if (!pPart) {
                 pPart = LoadPartition(key);
             }
-
-            if (!pPart) {
-                continue;
+            if (pPart) {
+                activePartitions.push_back({key, pPart});
             }
+        }
+
+        // 2. Query each active partition concurrently utilizing OpenMP 
+        std::mutex results_mutex;
+
+#pragma omp parallel for
+        for (long long i = 0; i < static_cast<long long>(activePartitions.size()); ++i) {
+            const auto& key = activePartitions[i].first;
+            auto pPart = activePartitions[i].second;
 
             auto results = pPart->index->Lookup(query, topK);
 
@@ -1271,8 +1278,8 @@ namespace Quanta
                 // Fetch vectors for all results (parallel natively inside dedup)
                 std::vector<std::vector<float>> vectors(results.size());
 
-                for (long long i = 0; i < static_cast<long long>(results.size()); ++i) {
-                    vectors[i] = pPart->index->GetVectorById(results[i].first);
+                for (long long j = 0; j < static_cast<long long>(results.size()); ++j) {
+                    vectors[j] = pPart->index->GetVectorById(results[j].first);
                 }
                 
                 // Get deduplicated indices
