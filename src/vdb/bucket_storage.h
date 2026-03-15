@@ -3,12 +3,20 @@
 #include <string>
 #include <vector>
 #include <filesystem>
-#include "partitioned_vdb.h" // Needed for Partition and WalRecordHeader structs
+#include "xpackage.h"
 
 namespace fs = std::filesystem;
 
 namespace Quanta
 {
+    // WAL Binary Record Format
+    #pragma pack(push, 1)
+    struct WalRecordHeader {
+        unsigned long long external_id;
+        unsigned long long timestamp_ms;
+        unsigned int chunk_text_length;
+    };
+    #pragma pack(pop)
     class BucketStorage
     {
     public:
@@ -17,11 +25,8 @@ namespace Quanta
         static fs::path GetVdbPath(const fs::path& basePath, const std::string& prefix, const std::string& tsPartition, int customIndex, const std::string& bucketStr);
         
         // WAL Methods
-        static bool AppendWalRecord(const fs::path& basePath, std::shared_ptr<Partition> p, const std::vector<unsigned long long>& extIds, const std::vector<std::string>& chunkTexts, long long timestampMs, const float* vectors, size_t count, int dimension);
+        static bool AppendWalRecord(const fs::path& basePath, const std::string& active_wal_filename, const std::vector<unsigned long long>& extIds, const std::vector<std::string>& chunkTexts, long long timestampMs, const float* vectors, size_t count, int dimension);
             
         static bool ReadWalFile(const fs::path& walPath, std::vector<char>& outBuffer);
-        
-        // Final Physical Bucket Methods
-        static bool SavePhysicalBucket(const fs::path& basePath, const std::string& prefix, std::shared_ptr<Partition> p, const std::string& key);
     };
 }

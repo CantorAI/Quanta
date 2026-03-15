@@ -50,14 +50,20 @@ def run_tests():
     time.sleep(1.0)
     
     print("Closing VDB to flush buckets...")
-    vdb.Close()
-    print("VDB closed successfully.")
+    sys.stdout.flush()
+    try:
+        vdb.Close()
+        print("VDB closed successfully.")
+    except Exception as e:
+        print(f"EXCEPTION DURING CLOSE: {e}")
+        raise
+    sys.stdout.flush()
     
     # Manifest validation
     print("\n=== [Database Physical Inspection & Integrity Check] ===")
-    conn = sqlite3.connect(os.path.join(vdb_path, "comp_manifest.db"))
+    conn = sqlite3.connect(os.path.join(vdb_path, "comp_config.db"))
     c = conn.cursor()
-    c.execute("SELECT key, ts_partition, custom_index, bucket_number, ts_start, ts_end FROM buckets ORDER BY bucket_number")
+    c.execute("SELECT key, ts_partition, custom_index, bucket_number, ts_start, ts_end FROM partitions ORDER BY bucket_number")
     rows = c.fetchall()
     print(f"Buckets Physically Created in SQLite: {len(rows)}")
     for r in rows:
@@ -116,7 +122,7 @@ def run_tests():
     for i in range(10):
         # Format dict matching GroupingItem C++ ingestion 
         candidates.append({
-            "image_id": 1000 + i, 
+            "id": 1000 + i, 
             "device_id": "CAM_1", 
             "timestamp": base_ts + 10000 # Matches Batch 1
         })
@@ -142,7 +148,21 @@ def run_tests():
     assert label_data is not None, "QueryLabelByID failed to retrieve vector payload"
     
     print("\nAll Comprehensive Tests Passed! Quanta Engine is mathematically clean.")
-    vdb.Close()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        print("Starting VDB Close...", flush=True)
+        vdb.Close()
+        print("Finished VDB Close!", flush=True)
+    except Exception as e:
+        print(f"Exception during Close: {e}", flush=True)
 
 if __name__ == "__main__":
-    run_tests()
+    try:
+        run_tests()
+    except Exception as e:
+        import sys
+        print(f"FATAL PYTHON EXCEPTION: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(2)

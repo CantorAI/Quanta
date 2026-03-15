@@ -1,6 +1,7 @@
 #include "scene_tracker.h"
 #include "partitioned_vdb.h"
 #include <algorithm>
+#include <mutex>
 
 namespace Quanta
 {
@@ -48,6 +49,7 @@ namespace Quanta
     void SceneTracker::Append(X::XRuntime* rt, X::XObj* pContext,
         X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
     {
+        std::lock_guard<std::mutex> lock(tracker_mutex_);
         if (!vdb_ || params.size() < 1)
         {
             retValue = X::Value(false);
@@ -165,6 +167,7 @@ namespace Quanta
     // ============================================================================
     void SceneTracker::Reset()
     {
+        std::lock_guard<std::mutex> lock(tracker_mutex_);
         state_ = SceneState{};
     }
 
@@ -173,6 +176,7 @@ namespace Quanta
     // ============================================================================
     X::Value SceneTracker::GetState()
     {
+        std::lock_guard<std::mutex> lock(tracker_mutex_);
         X::Dict dict;
         dict->Set("scene_id", state_.scene_id);
         dict->Set("frame_count", state_.frame_count);

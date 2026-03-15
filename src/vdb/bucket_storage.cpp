@@ -15,9 +15,9 @@ namespace Quanta
         return basePath / (prefix + "_" + tsPartition + "_" + std::to_string(customIndex) + "_" + bucketStr + ".vdb");
     }
 
-    bool BucketStorage::AppendWalRecord(const fs::path& basePath, std::shared_ptr<Partition> p, const std::vector<unsigned long long>& extIds, const std::vector<std::string>& chunkTexts, long long timestampMs, const float* vectors, size_t count, int dimension)
+    bool BucketStorage::AppendWalRecord(const fs::path& basePath, const std::string& active_wal_filename, const std::vector<unsigned long long>& extIds, const std::vector<std::string>& chunkTexts, long long timestampMs, const float* vectors, size_t count, int dimension)
     {
-        fs::path walPath = basePath / p->active_wal_filename_;
+        fs::path walPath = basePath / active_wal_filename;
         std::ofstream walFile(walPath, std::ios::binary | std::ios::app);
         if (!walFile.is_open()) return false;
 
@@ -56,27 +56,6 @@ namespace Quanta
                 return false;
             }
         }
-        return true;
-    }
-
-    bool BucketStorage::SavePhysicalBucket(const fs::path& basePath, const std::string& prefix, std::shared_ptr<Partition> p, const std::string& key)
-    {
-        if (!p || !p->index || !p->vdb) return false;
-        
-        size_t last_under = key.rfind('_');
-        size_t first_under = key.find('_');
-        if (first_under == std::string::npos || last_under == std::string::npos || first_under == last_under) return false;
-
-        std::string tsPartition = key.substr(0, first_under);
-        int customIndex = std::stoi(key.substr(first_under + 1, last_under - first_under - 1));
-        std::string bucketStr = key.substr(last_under + 1);
-
-        fs::path hnswPath = GetHnswPath(basePath, prefix, tsPartition, customIndex, bucketStr);
-        fs::path vdbPath = GetVdbPath(basePath, prefix, tsPartition, customIndex, bucketStr);
-
-        p->index->Save(hnswPath.string());
-        p->vdb->Save(vdbPath.string());
-
         return true;
     }
 }

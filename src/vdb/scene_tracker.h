@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <mutex>
 
 namespace Quanta
 {
@@ -29,6 +30,7 @@ namespace Quanta
         float threshold_ = 0.85f;
         int dimension_ = 0;
         SceneState state_;
+        std::mutex tracker_mutex_;
 
     public:
         BEGIN_PACKAGE(SceneTracker)
