@@ -69,36 +69,42 @@ def main():
         model, preprocess = clip.load("ViT-B/32", device=device)
         print(f"[+] CLIP Model loaded precisely on {device}")
         
-        for search_text in queries:
+        for loop_idx in range(1000):
             print(f"\n==========================================")
-            print(f"[*] Querying string: '{search_text}'")
+            print(f"=== Benchmark Round {loop_idx + 1}/1000 ===")
             print(f"==========================================")
             
-            # Tokenize and execute model encode layer natively
-            text_input = clip.tokenize([search_text]).to(device)
-            with torch.no_grad():
-                text_features = model.encode_text(text_input)
+            for search_text in queries:
+                print(f"\n[*] Querying string: '{search_text}'")
                 
-            # Natively cast back to flat Python lists (FP32)
-            text_features = text_features.cpu().numpy().astype(np.float32)
-            query_np = text_features
+                # Tokenize and execute model encode layer natively
+                text_input = clip.tokenize([search_text]).to(device)
+                with torch.no_grad():
+                    text_features = model.encode_text(text_input)
+                    
+                # Natively cast back to flat Python lists (FP32)
+                text_features = text_features.cpu().numpy().astype(np.float32)
+                query_np = text_features
+                
+                t0 = time.time()
+                
+                # Empty partition uses the global index graph sweeping history
+                results = vdb.Lookup(query_np, 5, dedup=0.5, ts_start=0) 
+                
+                t1 = time.time()
+                latency = (t1 - t0) * 1000
+                
+                print(f"  -> Search executed in {latency:.2f}ms. Matching Nodes Found: {len(results) if results else 0}")
+                
+                if results:
+                    for i, match in enumerate(results):
+                        # match: [ExtID, Score, MetaStruct, Key, Timestamp]
+                        print(f"    Match #{i+1} : id={match[0]}, score={match[1]:.4f}, key='{match[3]}', ts={match[4]}")
+                else:
+                    print("    [-] No valid targets found.")
             
-            t0 = time.time()
-            
-            # Empty partition uses the global index graph sweeping history
-            results = vdb.Lookup(query_np, 5, dedup=0.5, ts_start=0) 
-            
-            t1 = time.time()
-            latency = (t1 - t0) * 1000
-            
-            print(f"  -> Search executed in {latency:.2f}ms. Matching Nodes Found: {len(results) if results else 0}")
-            
-            if results:
-                for i, match in enumerate(results):
-                    # match: [ExtID, Score, MetaStruct, Key, Timestamp]
-                    print(f"    Match #{i+1} : id={match[0]}, score={match[1]:.4f}, key='{match[3]}', ts={match[4]}")
-            else:
-                print("    [-] No valid targets found.")
+            print(f"\n[+] Sleeping for 5 seconds before next round...")
+            time.sleep(0.1)
                 
     except Exception as e:
         print(f"[-] FATAL ERROR executing CLIP Model: {e}")

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <mutex>
 #include <fstream>
+#include <filesystem>
 #include "xlang.h"
 
 namespace Quanta {
@@ -122,7 +123,15 @@ namespace Quanta {
 
         bool Save(const std::string& filename) const {
             std::lock_guard<std::mutex> lock(mtx);
-            std::ofstream ofs(filename, std::ios::binary);
+            std::string newPath = filename + ".new";
+            std::string oldPath = filename + ".old";
+            
+            std::error_code ec;
+            if (std::filesystem::exists(newPath, ec)) {
+                std::filesystem::remove(newPath, ec);
+            }
+
+            std::ofstream ofs(newPath, std::ios::binary);
             if (!ofs) {
                 return false;
             }
@@ -189,12 +198,39 @@ namespace Quanta {
                 ofs.write(reinterpret_cast<const char*>(&id), sizeof(id));
                 ofs.write(reinterpret_cast<const char*>(&ts), sizeof(ts));
             }
-			return true;
+            
+            ofs.close();
+            
+            if (std::filesystem::exists(filename, ec)) {
+                if (std::filesystem::exists(oldPath, ec)) {
+                    std::filesystem::remove(oldPath, ec);
+                }
+                std::filesystem::rename(filename, oldPath, ec);
+            }
+            std::filesystem::rename(newPath, filename, ec);
+            
+            if (std::filesystem::exists(oldPath, ec)) {
+                std::filesystem::remove(oldPath, ec);
+            }
+            
+            return true;
         }
 
         // Load database state (thread‑safe)
         bool Load(const std::string& filename) {
             std::lock_guard<std::mutex> lock(mtx);
+            
+            std::string newPath = filename + ".new";
+            std::string oldPath = filename + ".old";
+            std::error_code ec;
+            if (!std::filesystem::exists(filename, ec)) {
+                if (std::filesystem::exists(newPath, ec)) {
+                    std::filesystem::rename(newPath, filename, ec);
+                } else if (std::filesystem::exists(oldPath, ec)) {
+                    std::filesystem::rename(oldPath, filename, ec);
+                }
+            }
+
             std::ifstream ifs(filename, std::ios::binary);
             if (!ifs) {
                 return false;

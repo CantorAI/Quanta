@@ -16,21 +16,30 @@ namespace Quanta
 
         if (auto it = kwParams.find("path"); it) {
             path = it->val.ToString();
+            // Normalize path for consistent caching
+            if (!path.empty()) {
+                path = std::filesystem::absolute(std::filesystem::path(path)).make_preferred().string();
+            }
         }
         if (auto it = kwParams.find("prefix"); it) {
             prefix = it->val.ToString();
         }
 
         std::string cacheKey = path + "|" + prefix;
-
-        std::lock_guard<std::mutex> lock(m_vdbMutex);
-        if (m_vdbInstances.find(cacheKey) != m_vdbInstances.end()) {
-            retValue = m_vdbInstances[cacheKey];
-            return true;
+        {
+            std::lock_guard<std::mutex> lock(m_vdbMutex);
+            auto it = m_vdbInstances.find(cacheKey);
+            if (it != m_vdbInstances.end()) {
+                retValue = it->second;
+                return true;
+            }
         }
 
         // It's a new path. Create it manually via native XPackage instantiation.
-        X::XPackageValue<PartitionedVdb> PVDB(params, kwParams);
+        X::XPackageValue<PartitionedVdb> PVDB;
+        X::Value dummyRet;
+        bool res = PVDB->Init(rt, pContext, params, kwParams, dummyRet);
+        std::cout << "[QuantaHost] Initial Creation Init() result: " << res << "\n";
         X::Value varPvdb = PVDB;
 
         m_vdbInstances[cacheKey] = varPvdb;

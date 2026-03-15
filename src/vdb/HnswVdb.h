@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <queue>
 #include <omp.h>
+#include <filesystem>
 
 namespace Quanta {
 
@@ -165,23 +166,82 @@ namespace Quanta {
             return out;
         }
 
-        /// Persist index to disk (appends .hnsw)
+        /// Persist index to disk atomically using .new and .old
         void Save(const std::string& filename) {
             std::string base = NormalizeFilename(filename);
-            appr_alg_->saveIndex((base + ".hnsw").c_str());
+            std::string finalPath = base + ".hnsw";
+            std::string newPath = base + ".hnsw.new";
+            std::string oldPath = base + ".hnsw.old";
+            
+            std::error_code ec;
+            // Clean up any stale .new file just in case
+            if (std::filesystem::exists(newPath, ec)) {
+                std::filesystem::remove(newPath, ec);
+            }
+
+            // 1. Write to .new file
+            appr_alg_->saveIndex(newPath.c_str());
+            
+            // 2. Rename existing .hnsw to .old (if exists)
+            if (std::filesystem::exists(finalPath, ec)) {
+                if (std::filesystem::exists(oldPath, ec)) {
+                    std::filesystem::remove(oldPath, ec);
+                }
+                std::filesystem::rename(finalPath, oldPath, ec);
+            }
+            
+            // 3. Rename .new to .hnsw
+            std::filesystem::rename(newPath, finalPath, ec);
+            
+            // 4. Delete .old
+            if (std::filesystem::exists(oldPath, ec)) {
+                std::filesystem::remove(oldPath, ec);
+            }
         }
 
         /// Load index from disk (expects .hnsw)
         void Load(const std::string& filename) {
             std::string base = NormalizeFilename(filename);
+            std::string finalPath = base + ".hnsw";
+            std::string newPath = base + ".hnsw.new";
+            std::string oldPath = base + ".hnsw.old";
+            
+            std::error_code ec;
+            // Recover from interrupted save
+            if (!std::filesystem::exists(finalPath, ec)) {
+                if (std::filesystem::exists(newPath, ec)) {
+                    std::filesystem::rename(newPath, finalPath, ec);
+                } else if (std::filesystem::exists(oldPath, ec)) {
+                    std::filesystem::rename(oldPath, finalPath, ec);
+                }
+            }
+
             // rebuild new index object
             delete appr_alg_;
             appr_alg_ = new hnswlib::HierarchicalNSW<float>(
                 space_, max_elements_, M_, ef_construction_);
             appr_alg_->setEf(ef_search_);
-            appr_alg_->loadIndex((base + ".hnsw").c_str(),
-                space_,
-                max_elements_);
+            
+            try {
+                if (std::filesystem::exists(finalPath, ec)) {
+                    appr_alg_->loadIndex(finalPath.c_str(),
+                        space_,
+                        max_elements_);
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "[HnswVdb] WARNING: Failed to load index from " << finalPath << " (" << e.what() << "). Resetting to empty index.\n";
+                // Destroy the corrupted in-memory instance and recreate clean
+                delete appr_alg_;
+                appr_alg_ = new hnswlib::HierarchicalNSW<float>(
+                    space_, max_elements_, M_, ef_construction_);
+                appr_alg_->setEf(ef_search_);
+            } catch (...) {
+                std::cerr << "[HnswVdb] WARNING: Unknown fatal error loading " << finalPath << ". Resetting to empty index.\n";
+                delete appr_alg_;
+                appr_alg_ = new hnswlib::HierarchicalNSW<float>(
+                    space_, max_elements_, M_, ef_construction_);
+                appr_alg_->setEf(ef_search_);
+            }
         }
 
         /// Dynamically resize the maximum allowed elements in the graph
@@ -194,6 +254,10 @@ namespace Quanta {
 
         size_t GetMaxElements() const {
             return max_elements_;
+        }
+
+        size_t GetCurrentCount() const {
+            return appr_alg_->cur_element_count;
         }
 
     private:

@@ -64,6 +64,19 @@ namespace Quanta
             APISET().AddFunc<0>("Test", &QuantaHost::Test);
         END_PACKAGE
 
+
+        bool HasPartitionedVdb(const std::string& path, const std::string& prefix) {
+            std::lock_guard<std::mutex> lock(m_vdbMutex);
+            std::string cacheKey = path + "|" + prefix;
+            return m_vdbInstances.find(cacheKey) != m_vdbInstances.end();
+        }
+
+        void RegisterPartitionedVdb(const std::string& path, const std::string& prefix, X::Value& pvdb) {
+            std::lock_guard<std::mutex> lock(m_vdbMutex);
+            std::string cacheKey = path + "|" + prefix;
+            m_vdbInstances[cacheKey] = pvdb;
+        }
+
         inline X::Value GetCantor() { return m_cantor; }
 
         inline long long GetContentSize()

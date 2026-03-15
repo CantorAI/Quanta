@@ -96,15 +96,27 @@ namespace Quanta
 
     PartitionedVdb::PartitionedVdb(X::ARGS& params, X::KWARGS& kwParams)
     {
-        // Load SQLite package FIRST (required by Init -> InitDatabase)
-        X::Runtime rt;
-        X::Package sqlite(rt, "sqlite", "xlang_sqlite");
-        m_sqlite = sqlite;
+        std::cout << "[PartitionedVdb] Constructor called! params=" << params.size() << " kwargs=" << kwParams.size() << "\n";
+        
+        std::string path = "";
+        std::string prefix = "vdb";
+        if (auto it = kwParams.find("path"); it) {
+            path = it->val.ToString();
+            if (!path.empty()) {
+                path = fs::absolute(fs::path(path)).make_preferred().string();
+            }
+        }
+        if (auto it = kwParams.find("prefix"); it) prefix = it->val.ToString();
+
+        bool isNew = !QuantaHost::I().HasPartitionedVdb(path, prefix);
 
         // If params/kwargs provided, call Init
-        if (params.size() > 0 || kwParams.size() > 0) {
+        if (isNew && (params.size() > 0 || kwParams.size() > 0)) {
             X::Value retValue;
             Init(nullptr, nullptr, params, kwParams, retValue);
+            X::XPackageValue<PartitionedVdb> PVDB(this);
+			X::Value vdbValue = PVDB;
+			QuantaHost::I().RegisterPartitionedVdb(path, prefix, vdbValue);
         }
 
         // Initialize default partition (index 0)
@@ -112,11 +124,13 @@ namespace Quanta
         tagToIndex_["default"] = 0;
     }
 
+
     PartitionedVdb::~PartitionedVdb()
     {
+        std::cout << "[PartitionedVdb] DESTRUCTOR called!\n";
         Close();
         
-        std::lock_guard<std::recursive_mutex> lock(partitions_mutex_);
+        std::lock_guard<std::mutex> lock(partitions_mutex_);
         partitions_.clear();
     }
 
@@ -169,122 +183,8 @@ namespace Quanta
     }
 
     // ============================================================================
-    // SQLite Operations
+    // SQLite Operations Handled by VdbConfig
     // ============================================================================
-
-    void PartitionedVdb::InitDatabase()
-    {
-        std::string dbPath = GetDbPath().string();
-        X::Value db = m_sqlite["Database"](dbPath);
-        m_configDb = db;
-        auto execSQL = db["exec"];
-        auto statement = db["statement"];
-        X::Value statusROW = m_sqlite["ROW"];
-
-        // Create config table
-        X::Value checkStat = statement("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='config'");
-        bool hasConfigTable = false;
-        if (checkStat["step"]() == statusROW) {
-            hasConfigTable = (checkStat["get"](0).ToInt() > 0);
-        }
-
-        if (!hasConfigTable) {
-            execSQL("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)");
-        }
-
-        // Create custom_partitions table
-        checkStat = statement("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='custom_partitions'");
-        bool hasPartitionsTable = false;
-        if (checkStat["step"]() == statusROW) {
-            hasPartitionsTable = (checkStat["get"](0).ToInt() > 0);
-        }
-
-        if (!hasPartitionsTable) {
-            execSQL("CREATE TABLE custom_partitions (partition_index INTEGER, tag TEXT PRIMARY KEY)");
-            execSQL("INSERT INTO custom_partitions (partition_index, tag) VALUES (0, 'default')");
-        }
-
-        // Create buckets table for Tier 3 spilling
-        checkStat = statement("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='buckets'");
-        bool hasBucketsTable = false;
-        if (checkStat["step"]() == statusROW) {
-            hasBucketsTable = (checkStat["get"](0).ToInt() > 0);
-        }
-
-        if (!hasBucketsTable) {
-            execSQL("CREATE TABLE IF NOT EXISTS buckets (key TEXT PRIMARY KEY, ts_partition TEXT, custom_index INTEGER, bucket_number INTEGER, ts_start INTEGER, ts_end INTEGER)");
-        } else {
-            X::Value bucketCounterStat = statement("SELECT COUNT(*) FROM buckets");
-            if (bucketCounterStat["step"]() == statusROW) {
-                total_buckets_ = bucketCounterStat["get"](0).ToLongLong();
-            }
-        }
-    }
-
-    void PartitionedVdb::SyncConfigToDB()
-    {
-        auto statement = m_configDb["statement"];
-
-        X::Value stat = statement("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)");
-
-        for (const auto& [key, value] : config_) {
-            stat["bind"](1, key);
-            stat["bind"](2, value);
-            stat["step"]();
-            stat["reset"]();
-        }
-    }
-
-    void PartitionedVdb::LoadConfigFromDB()
-    {
-        if (!m_configDb.IsObject()) return;
-        auto statement = m_configDb["statement"];
-        X::Value statusROW = m_sqlite["ROW"];
-
-        config_.clear();
-
-        X::Value stat = statement("SELECT key, value FROM config");
-        while (stat["step"]() == statusROW) {
-            std::string key = stat["get"](0).ToString();
-            std::string value = stat["get"](1).ToString();
-            config_[key] = value;
-        }
-
-        ApplyConfigToMembers();
-    }
-
-    void PartitionedVdb::LoadCustomPartitionsFromDB()
-    {
-        auto statement = m_configDb["statement"];
-        X::Value statusROW = m_sqlite["ROW"];
-
-        customPartitionTags_.clear();
-        tagToIndex_.clear();
-
-        X::Value stat = statement("SELECT partition_index, tag FROM custom_partitions");
-        while (stat["step"]() == statusROW) {
-            int idx = stat["get"](0).ToInt();
-            std::string tag = stat["get"](1).ToString();
-            customPartitionTags_[idx].insert(tag);
-            tagToIndex_[tag] = idx;
-        }
-
-        // Ensure default exists
-        if (customPartitionTags_.find(0) == customPartitionTags_.end()) {
-            customPartitionTags_[0].insert("default");
-            tagToIndex_["default"] = 0;
-        }
-    }
-
-    void PartitionedVdb::SaveCustomPartitionToDB(int index, const std::string& tag)
-    {
-        auto statement = m_configDb["statement"];
-
-        X::Value stat = statement("INSERT OR REPLACE INTO custom_partitions (partition_index, tag) VALUES (?, ?)");
-        stat["bind"](1, index);
-        stat["bind"](2, tag);
-        stat["step"]();
-    }
 
     // ============================================================================
     // File Path Helpers
@@ -440,9 +340,11 @@ namespace Quanta
         tagToIndex_[tag] = idx;
 
         // Persist to DB
-        SaveCustomPartitionToDB(idx, tag);
+        if (m_config) m_config->SaveCustomPartitionToDB(idx, tag);
         SetConfig("next_custom_index", std::to_string(nextCustomIndex_));
-        SyncConfigToDB();
+        if (m_config) {
+            m_config->SyncConfigMap(config_);
+        }
 
         return idx;
     }
@@ -478,59 +380,62 @@ namespace Quanta
         customPartitionTags_[index].insert(tag);
         tagToIndex_[tag] = index;
 
-        SaveCustomPartitionToDB(index, tag);
+        if (m_config) m_config->SaveCustomPartitionToDB(index, tag);
         return true;
     }
 
-    std::shared_ptr<Partition> PartitionedVdb::GetOrCreatePartition(const std::string& tsPartition, int customIndex)
+    std::shared_ptr<VdbBucket> PartitionedVdb::GetOrCreatePartition(const std::string& tsPartition, int customIndex)
     {
-        // 1. Find the highest bucket_number for this tsPartition and customIndex in SQLite.
+        std::string mapKey = tsPartition + "_" + std::to_string(customIndex);
         int activeBucketNum = 0;
-        if (m_configDb.IsObject()) {
-            auto statement = m_configDb["statement"];
-            X::Value statusROW = m_sqlite["ROW"];
-            X::Value stat = statement("SELECT MAX(bucket_number) FROM buckets WHERE ts_partition=? AND custom_index=?");
-            stat["bind"](1, tsPartition);
-            stat["bind"](2, customIndex);
-            if (stat["step"]() == statusROW) {
-                X::Value val = stat["get"](0);
-                if (val.IsValid() && val.IsObject()) {
-                    activeBucketNum = val.ToInt();
-                }
+        {
+            std::lock_guard<std::mutex> lock(partitions_mutex_);
+            auto it = highest_buckets_.find(mapKey);
+            if (it != highest_buckets_.end()) {
+                activeBucketNum = it->second;
             }
         }
-
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%04d", activeBucketNum);
-        std::string bucketStr = buf;
-
-        std::string key = tsPartition + "_" + std::to_string(customIndex) + "_" + bucketStr;
 
         long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
-        std::lock_guard<std::recursive_mutex> lock(partitions_mutex_);
-        
         while (true) {
             char buf[16];
             snprintf(buf, sizeof(buf), "%04d", activeBucketNum);
             std::string bucketStr = buf;
             std::string key = tsPartition + "_" + std::to_string(customIndex) + "_" + bucketStr;
 
-            auto it = partitions_.find(key);
-            if (it != partitions_.end()) {
-                if (it->second->count >= maxElements_) {
-                    if (!it->second->is_historical_read_) {
-                        SavePartition(it->second, key);
-                        it->second->is_historical_read_ = true; 
-                        // DO NOT ERASE from RAM yet! Allow TTL MaintenanceLoop to organically prune it 
-                        // after the WAL thread merges and updates the physical disk size.
+            std::shared_ptr<VdbBucket> foundPart = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(partitions_mutex_);
+                auto it = partitions_.find(key);
+                if (it != partitions_.end()) {
+                    foundPart = it->second;
+                }
+            }
+
+            if (foundPart) {
+                if (foundPart->GetTotalInsertedCount() >= maxElements_) {
+                    bool need_save = false;
+                    {
+                        std::lock_guard<std::mutex> plock(foundPart->GetLock());
+                        if (!foundPart->IsHistoricalRead()) {
+                            need_save = true;
+                            foundPart->SetHistoricalRead(true);
+                        }
+                    }
+                    if (need_save) {
+                        SavePartition(foundPart, key);
                     }
                     activeBucketNum++;
+                    {
+                        std::lock_guard<std::mutex> lock(partitions_mutex_);
+                        highest_buckets_[mapKey] = activeBucketNum;
+                    }
                     continue; 
                 } else {
-                    it->second->last_access_ms_ = now_ms;
-                    return it->second;
+                    foundPart->UpdateAccessTime(now_ms);
+                    return foundPart;
                 }
             }
 
@@ -538,58 +443,44 @@ namespace Quanta
             fs::path vdbPath = BucketStorage::GetVdbPath(basePath_, prefix_, tsPartition, customIndex, bucketStr);
 
             if (fs::exists(hnswPath) && fs::exists(vdbPath)) {
-                auto partition = std::make_shared<Partition>();
-                partition->vdb = std::make_unique<VectorDatabase>(dimension_);
-                partition->vdb->Load(vdbPath.string());
-                partition->count = partition->vdb->GetSize();
+                auto partition = std::make_shared<VdbBucket>(dimension_, spaceName_, maxElements_, M_, efConstruction_, efSearch_, key);
                 
-                if (partition->count >= maxElements_) {
-                     activeBucketNum++;
-                     continue;
+                // DECOUPLE: Massive native Disk Load outside map lock
+                partition->Load(vdbPath, hnswPath);
+                long long outStart = 0; long long outEnd = 0;
+                if (m_config && m_config->LoadBucketBounds(key, outStart, outEnd)) {
+                    partition->SetBounds(outStart, outEnd);
                 }
                 
-                partition->index = std::make_unique<HnswVdb>(
-                    spaceName_, dimension_, maxElements_, M_, efConstruction_, efSearch_);
-                partition->index->Load(hnswPath.string());
-                
-                if (m_configDb.IsObject()) {
-                    auto statement = m_configDb["statement"];
-                    X::Value statusROW = m_sqlite["ROW"];
-                    X::Value stat = statement("SELECT ts_start, ts_end FROM buckets WHERE key=?");
-                    stat["bind"](1, key);
-                    if (stat["step"]() == statusROW) {
-                        partition->ts_start_ = stat["get"](0).ToLongLong();
-                        partition->ts_end_ = stat["get"](1).ToLongLong();
+                if (partition->GetTotalInsertedCount() >= maxElements_) {
+                    activeBucketNum++;
+                    {
+                        std::lock_guard<std::mutex> lock(partitions_mutex_);
+                        highest_buckets_[mapKey] = activeBucketNum;
                     }
+                    continue;
                 }
-                partition->is_historical_read_ = false; 
-
-                partition->key_ = key; // Added this line
-                partition->is_dirty_ = true;
-                partition->last_access_ms_ = now_ms;
-                partition->last_save_ms_ = now_ms;
-                partitions_[key] = std::move(partition);
-                return partitions_[key];
+                
+                {
+                    std::lock_guard<std::mutex> lock(partitions_mutex_);
+                    partitions_[key] = partition;
+                }
+                
+                return partition;
             }
 
             total_buckets_++;
-            total_buckets_++;
-            auto partition = std::make_unique<Partition>();
-            partition->vdb = std::make_unique<VectorDatabase>(dimension_);
-            partition->index = std::make_unique<HnswVdb>(
-                spaceName_, dimension_, maxElements_, M_, efConstruction_, efSearch_);
-            partition->is_historical_read_ = false;
-
-            partition->key_ = key;
-            partition->is_dirty_ = true;
-            partition->last_access_ms_ = now_ms;
-            partition->last_save_ms_ = now_ms;
-            partitions_[key] = std::move(partition);
-            return partitions_[key];
+            auto partition = std::make_shared<VdbBucket>(dimension_, spaceName_, maxElements_, M_, efConstruction_, efSearch_, key);
+            
+            {
+                std::lock_guard<std::mutex> lock(partitions_mutex_);
+                partitions_[key] = partition;
+            }
+            return partition;
         }
     }
 
-    std::shared_ptr<Partition> PartitionedVdb::LoadPartition(const std::string& key)
+    std::shared_ptr<VdbBucket> PartitionedVdb::LoadPartition(const std::string& key)
     {
 
         // Parse key: tsPartition_customIndex_bucketNum
@@ -613,12 +504,13 @@ namespace Quanta
         long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
-        std::unique_lock<std::recursive_mutex> lock(partitions_mutex_);
-
-        auto it = partitions_.find(key);
-        if (it != partitions_.end()) {
-            it->second->last_access_ms_ = now_ms;
-            return it->second;
+        {
+            std::lock_guard<std::mutex> lock(partitions_mutex_);
+            auto it = partitions_.find(key);
+            if (it != partitions_.end()) {
+                it->second->UpdateAccessTime(now_ms);
+                return it->second;
+            }
         }
 
         // LRU Read-Only Throttling: Enforce capacity to prevent deep historical queries from bursting RAM boundaries
@@ -626,25 +518,23 @@ namespace Quanta
         std::string oldestKey = "";
         long long oldestAccess = LLONG_MAX;
         
-
-        for (const auto& [k, p] : partitions_) {
-            if (!p) {
-
-                continue;
-            }
-            if (p->is_historical_read_) {
-                readOnlyCount++;
-                if (p->last_access_ms_ < oldestAccess) {
-                    oldestAccess = p->last_access_ms_;
-                    oldestKey = k;
+        {
+            std::lock_guard<std::mutex> lock(partitions_mutex_);
+            for (const auto& [k, p] : partitions_) {
+                if (!p) continue;
+                if (p->IsHistoricalRead()) {
+                    readOnlyCount++;
+                    if (p->GetLastAccessMs() < oldestAccess) {
+                        oldestAccess = p->GetLastAccessMs();
+                        oldestKey = k;
+                    }
                 }
             }
-        }
 
-        if (readOnlyCount >= max_loaded_read_only_partitions_ && !oldestKey.empty()) {
-
-            // We've hit the exact quota for static lookups. Drop the oldest historical bucket out of RAM.
-            partitions_.erase(oldestKey);
+            if (readOnlyCount >= max_loaded_read_only_partitions_ && !oldestKey.empty()) {
+                // Drop oldest historical bucket
+                partitions_.erase(oldestKey);
+            }
         }
 
         fs::path hnswPath = BucketStorage::GetHnswPath(basePath_, prefix_, tsPartition, customIndex, bucketStr);
@@ -656,47 +546,25 @@ namespace Quanta
         }
 
         // Pre-allocate the partition and insert it to prevent concurrent loads
-        auto partition = std::make_shared<Partition>();
-        partition->vdb = std::make_unique<VectorDatabase>(dimension_);
-        partition->index = std::make_unique<HnswVdb>(
-            spaceName_, dimension_, maxElements_, M_, efConstruction_, efSearch_);
-            
-        partition->key_ = key;
-        partition->last_access_ms_ = now_ms;
-        partition->last_save_ms_ = now_ms;
+        auto partition = std::make_shared<VdbBucket>(dimension_, spaceName_, maxElements_, M_, efConstruction_, efSearch_, key);
         
-        // Temporarily store empty partition in map
-        partitions_[key] = partition;
+        // No need to temporarily store empty partition since we're using loading_partitions_
 
         // ==========================================================
-        // RELEASE GLOBAL MUTEX DURING MASSIVE DISK I/O
+        // MASSIVE DISK I/O EXECUTED FREELY OUTSIDE MAP LOCK
         // ==========================================================
-        lock.unlock();
-
-        partition->vdb->Load(vdbPath.string());
-        partition->index->Load(hnswPath.string());
-        
-        lock.lock();
-        // ==========================================================
-        // REAQUIRE MUTEX FOR METADATA FINALIZATION
-        // ==========================================================
-
-        partition->count = partition->vdb->GetSize();
-        partition->is_historical_read_ = true; // explicitly mark as read-only historical
-        
-        // Try getting bounds from DB to cache them in RAM
-        if (m_configDb.IsObject()) {
-            auto statement = m_configDb["statement"];
-            X::Value statusROW = m_sqlite["ROW"];
-            X::Value stat = statement("SELECT ts_start, ts_end FROM buckets WHERE key=?");
-            stat["bind"](1, key);
-            if (stat["step"]() == statusROW) {
-                partition->ts_start_ = stat["get"](0).ToLongLong();
-                partition->ts_end_ = stat["get"](1).ToLongLong();
-            }
+        partition->Load(vdbPath, hnswPath);
+        long long outStart = 0; long long outEnd = 0;
+        if (m_config && m_config->LoadBucketBounds(key, outStart, outEnd)) {
+            partition->SetBounds(outStart, outEnd);
         }
 
-        return partitions_[key];
+        {
+            std::lock_guard<std::mutex> lock(partitions_mutex_);
+            partitions_[key] = partition;
+        }
+        
+        return partition;
     }
 
     std::vector<std::string> PartitionedVdb::ScanMatchingPartitions(
@@ -708,32 +576,10 @@ namespace Quanta
         if (tsStartMs <= 0) tsStartMs = 0;
         if (tsEndMs <= 0) tsEndMs = LLONG_MAX;
 
-        // Query SQLite manifest for saved buckets that overlap the time window
-        if (m_configDb.IsObject()) {
-            auto statement = m_configDb["statement"];
-            X::Value statusROW = m_sqlite["ROW"];
-            
-            std::string q = "SELECT key, ts_start, ts_end, custom_index, ts_partition FROM buckets";
-            X::Value stat = statement(q);
-            
-            while (stat["step"]() == statusROW) {
-                std::string key = stat["get"](0).ToString();
-                long long bStart = stat["get"](1).ToLongLong();
-                long long bEnd = stat["get"](2).ToLongLong();
-                int cIndex = stat["get"](3).ToInt();
-                std::string tsPartition = stat["get"](4).ToString();
-
-                if (!customIndices.empty() && customIndices.find(cIndex) == customIndices.end()) continue;
-                
-                if (bStart > 0 && bEnd > 0) {
-                    if (bStart > tsEndMs || bEnd < tsStartMs) continue;
-                } else {
-                    auto [partStartMs, partEndMs] = PartitionNameToTimeRange(tsPartition);
-                    if (partEndMs < tsStartMs || partStartMs > tsEndMs) continue;
-                }
-                
-                result.push_back(key);
-            }
+        // Query SQLite manifest via abstract config API
+        if (m_config) {
+            std::vector<std::string> dbKeys = m_config->ScanMatchingBuckets(tsStartMs, tsEndMs, customIndices);
+            result.insert(result.end(), dbKeys.begin(), dbKeys.end());
         }
 
         // Include in-memory partitions not yet saved or actively being written
@@ -749,8 +595,8 @@ namespace Quanta
 
             if (!customIndices.empty() && customIndices.find(customIndex) == customIndices.end()) continue;
 
-            long long pStart = partition->ts_start_.load();
-            long long pEnd = partition->ts_end_.load();
+            long long pStart = partition->GetTsStart();
+            long long pEnd = partition->GetTsEnd();
 
             if (pStart > 0 && pEnd > 0) {
                 if (pStart > tsEndMs || pEnd < tsStartMs) continue;
@@ -773,8 +619,9 @@ namespace Quanta
     bool PartitionedVdb::Init(X::XRuntime* rt, X::XObj* pContext,
         X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
     {
+        std::cout << "[PartitionedVdb] Init() executed!\n";
         // Parse parameters into config map
-        auto parseParam = [&](const std::string& key, const std::string& defaultVal) {
+        auto parseParam = [this, &kwParams](const std::string& key, const std::string& defaultVal) {
             if (auto it = kwParams.find(key.c_str()); it) {
                 SetConfig(key, it->val.ToString());
             }
@@ -840,28 +687,31 @@ namespace Quanta
         maxElements_ = bytes_limit / total_bytes_per_vector;
         if (maxElements_ < 1000) maxElements_ = 1000; // Hard minimum safety
 
-        // Initialize database
-        InitDatabase();
+        // Initialize configuration manager and sync
+        m_config = std::make_unique<VdbConfig>();
+        X::Runtime runtimeWrapper;
+        if (rt != nullptr) {
+            runtimeWrapper = X::Runtime(rt);
+        }
+        if (m_config->Init(runtimeWrapper, basePath_, prefix_, customPartitionTags_)) {
+            // Rebuild reverse lookup
+            tagToIndex_.clear();
+            for (const auto& [idx, tagSet] : customPartitionTags_) {
+                for (const auto& t : tagSet) {
+                    tagToIndex_[t] = idx;
+                }
+            }
+            if (customPartitionTags_.find(0) == customPartitionTags_.end()) {
+                customPartitionTags_[0].insert("default");
+                tagToIndex_["default"] = 0;
+            }
 
-        // If the DB already has config data (i.e. this is an existing VDB),
-        // load from it instead of overwriting with fresh defaults.
-        {
-            auto statement = m_configDb["statement"];
-            X::Value statusROW = m_sqlite["ROW"];
-            X::Value countStat = statement("SELECT COUNT(*) FROM config");
-            int configCount = 0;
-            if (countStat["step"]() == statusROW) {
-                configCount = countStat["get"](0).ToInt();
-            }
-            if (configCount > 0) {
-                // Existing DB: load config and partitions from it
-                LoadConfigFromDB();
-                LoadCustomPartitionsFromDB();
-            }
-            else {
-                // Fresh DB: sync our in-memory config to it
-                SyncConfigToDB();
-            }
+            // Sync RAM config natively with DB
+            m_config->SyncConfigMap(config_);
+            ApplyConfigToMembers();
+            
+            // Pre-load all DB bucket limits instantly into native C++ mapping
+            m_config->LoadHighestBucketsMap(highest_buckets_);
         }
 
         // ==========================================
@@ -887,7 +737,10 @@ namespace Quanta
             wals_cv_.notify_one();
         }
 
+        is_closed_ = false;
+        stop_thread_ = false;
         StartMaintenanceThread();
+        ingestion_thread_ = std::thread(&PartitionedVdb::IngestionLoop, this);
 
         retValue = X::Value(true);
         return true;
@@ -900,6 +753,8 @@ namespace Quanta
     void PartitionedVdb::AddVectors(X::XRuntime* rt, X::XObj* pContext,
         X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
     {
+        auto t0 = std::chrono::high_resolution_clock::now();
+
         if (params.size() < 2) {
             retValue = X::Value(false);
             return;
@@ -920,17 +775,7 @@ namespace Quanta
             numThreads = it->val.ToInt();
         }
 
-        // Determine partition
-        std::string tsPartition = TimestampToPartitionName(timestampMs);
-        int customIndex = GetOrCreateCustomIndex(partitionTag);
-
-        std::shared_ptr<Partition> partition = GetOrCreatePartition(tsPartition, customIndex);
-        if (!partition) {
-            retValue = X::Value(false);
-            return;
-        }
-
-        // Get vectors
+        // Validate basic dimensions and setup vector parsing for queue
         X::Value vecVal = params[1];
         if (!vecVal.IsTensor()) {
             retValue = X::Value(false);
@@ -992,52 +837,116 @@ namespace Quanta
             }
         }
 
-        // Add to partition (with timestamp)
-        // partition->vdb->AddLabels(extIds, chunkTexts, static_cast<unsigned long long>(timestampMs));
-        // partition->index->AddVectors(recIdx, rawPtr, totalCount, numThreads);
-        // partition->count += n;
-        // partition->is_dirty_ = true;
-
-        if (timestampMs > 0) {
-            long long current_start = partition->ts_start_.load();
-            long long current_end = partition->ts_end_.load();
-            if (current_start == 0 || timestampMs < current_start) partition->ts_start_ = timestampMs;
-            if (current_end == 0 || timestampMs > current_end) partition->ts_end_ = timestampMs;
+        // Cache the last ID before std::move invalidates the local vector
+        long long lastAssignedId = 0;
+        if (n > 0) {
+            lastAssignedId = static_cast<long long>(extIds[n - 1]);
         }
 
-        // Update logical partition count so bucket cascades trigger dynamically in GetOrCreatePartition
-        partition->count += n;
+        AsyncAddTask task;
+        task.timestampMs = timestampMs;
+        task.partitionTag = partitionTag;
+        task.numThreads = numThreads;
+        task.extIds = std::move(extIds);
+        task.chunkTexts = std::move(chunkTexts);
+        task.vectors.assign(rawPtr, rawPtr + totalCount);
+        task.n = n;
+        task.dimension = dimension_;
 
-        // ==========================================
-        // WAL (Write-Ahead Log) Synchronous Append
-        // ==========================================
         {
-            std::lock_guard<std::recursive_mutex> lock(partitions_mutex_);
-            long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
-            
-            if (partition->active_wal_filename_.empty()) {
-                partition->active_wal_filename_ = partition->key_ + ".wal_" + std::to_string(now_ms);
-            }
+            std::lock_guard<std::mutex> qLock(ingestion_mutex_);
+            ingestion_queue_.push(std::move(task));
+        }
+        ingestion_cv_.notify_one();
 
-            BucketStorage::AppendWalRecord(basePath_, partition, extIds, chunkTexts, timestampMs, rawPtr, n, dimension_);
-
-            partition->active_wal_record_count_ += n;
-            partition->last_wal_append_ms_ = now_ms;
-            
-            if (partition->active_wal_record_count_ >= wal_rotation_threshold_) {
-                {
-                    std::lock_guard<std::mutex> wlock(wals_mutex_);
-                    pending_wals_.push(partition->active_wal_filename_);
-                }
-                wals_cv_.notify_one();
-                
-                partition->active_wal_filename_.clear();
-                partition->active_wal_record_count_ = 0;
-            }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double latency_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        if (n > 0) {
+            std::cout << "[PartitionedVdb] AddVectors queued " << n << " items. Call time: " << latency_ms << " ms\n";
         }
 
-        retValue = X::Value(static_cast<long long>(extIds[n - 1]));
+        retValue = X::Value(lastAssignedId);
+    }
+
+    void PartitionedVdb::IngestionLoop()
+    {
+        while (!stop_thread_) {
+            AsyncAddTask task;
+            {
+                std::unique_lock<std::mutex> lock(ingestion_mutex_);
+                ingestion_cv_.wait(lock, [this]() {
+                    return !ingestion_queue_.empty() || stop_thread_;
+                });
+
+                if (stop_thread_ && ingestion_queue_.empty()) break;
+
+                task = std::move(ingestion_queue_.front());
+                ingestion_queue_.pop();
+            }
+
+            auto t0 = std::chrono::high_resolution_clock::now();
+
+            // Determine partition safely
+            std::string tsPartition = TimestampToPartitionName(task.timestampMs);
+            int customIndex = GetOrCreateCustomIndex(task.partitionTag);
+
+            std::shared_ptr<VdbBucket> partition = GetOrCreatePartition(tsPartition, customIndex);
+            if (!partition) continue;
+
+            const float* rawPtr = task.vectors.data();
+
+            if (task.timestampMs > 0) {
+                long long current_start = partition->GetTsStart();
+                long long current_end = partition->GetTsEnd();
+                if (current_start == 0 || task.timestampMs < current_start) partition->SetBounds(task.timestampMs, current_end);
+                if (current_end == 0 || task.timestampMs > current_end) partition->SetBounds(partition->GetTsStart(), task.timestampMs);
+            }
+
+            // count managed by VdbBucket internally
+
+            // ==========================================
+            // WAL (Write-Ahead Log) Synchronous Append safely decoupled!
+            // ==========================================
+            std::string target_wal;
+            {
+                std::lock_guard<std::mutex> lock(partition->GetLock());
+                long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                
+                if (partition->active_wal_filename_.empty()) {
+                    partition->active_wal_filename_ = partition->GetKey() + ".wal_" + std::to_string(now_ms);
+                }
+                target_wal = partition->active_wal_filename_;
+            }
+
+            // EXECUTED COMPLETELY UNLOCKED OUTSIDE THE MUTEX!
+            BucketStorage::AppendWalRecord(basePath_, target_wal, task.extIds, task.chunkTexts, task.timestampMs, rawPtr, task.n, task.dimension);
+
+            {
+                std::lock_guard<std::mutex> lock(partition->GetLock());
+                long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                    
+                partition->active_wal_record_count_ += task.n;
+                partition->IncrementTotalInsertedCount(task.n);
+                partition->last_wal_append_ms_ = now_ms;
+                
+                if (partition->active_wal_record_count_ >= wal_rotation_threshold_) {
+                    {
+                        std::lock_guard<std::mutex> wlock(wals_mutex_);
+                        pending_wals_.push(partition->active_wal_filename_);
+                    }
+                    wals_cv_.notify_one();
+                    
+                    partition->active_wal_filename_.clear();
+                    partition->active_wal_record_count_ = 0;
+                }
+            }
+
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double store_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            std::cout << "[PartitionedVdb] IngestionLoop stored " << task.n << " items to WAL. Write time: " << store_ms << " ms\n";
+        }
     }
 
     bool PartitionedVdb::QueryLabelByID(X::XRuntime* rt, X::XObj* pContext,
@@ -1076,11 +985,11 @@ namespace Quanta
             std::vector<std::string> matchingKeys = ScanMatchingPartitions(timestampMs, timestampMs, indices);
 
             for (const auto& key : matchingKeys) {
-                std::shared_ptr<Quanta::Partition> pPart = partitions_.count(key) ?
+                std::shared_ptr<Quanta::VdbBucket> pPart = partitions_.count(key) ?
                     partitions_[key] : LoadPartition(key);
 
                 if (pPart) {
-                    std::string label = pPart->vdb->GetTextById(id);
+                    std::string label = pPart->GetTextById(id);
                     if (!label.empty()) {
                         retValue = label;
                         return true;
@@ -1103,11 +1012,11 @@ namespace Quanta
             std::vector<std::string> matchingKeys = ScanMatchingPartitions(0, LLONG_MAX, indices);
 
             for (const auto& key : matchingKeys) {
-                std::shared_ptr<Quanta::Partition> partition = partitions_.count(key) ?
+                std::shared_ptr<Quanta::VdbBucket> partition = partitions_.count(key) ?
                     partitions_[key] : LoadPartition(key);
 
                 if (partition) {
-                    std::string label = partition->vdb->GetTextById(id);
+                    std::string label = partition->GetTextById(id);
                     if (!label.empty()) {
                         retValue = label;
                         return true;
@@ -1130,11 +1039,11 @@ namespace Quanta
                 // Only check keys that match our time partition
                 size_t first_under = key.find('_');
                 if (first_under != std::string::npos && key.substr(0, first_under) == tsPartition) {
-                    std::shared_ptr<Quanta::Partition> pPart = partitions_.count(key) ?
+                    std::shared_ptr<Quanta::VdbBucket> pPart = partitions_.count(key) ?
                         partitions_[key] : LoadPartition(key);
 
                     if (pPart) {
-                        std::string label = pPart->vdb->GetTextById(id);
+                        std::string label = pPart->GetTextById(id);
                         if (!label.empty()) {
                             retValue = label;
                             return true;
@@ -1151,11 +1060,11 @@ namespace Quanta
         std::vector<std::string> allKeys = ScanMatchingPartitions(0, LLONG_MAX, emptySet);
 
         for (const auto& key : allKeys) {
-            std::shared_ptr<Quanta::Partition> pPart = partitions_.count(key) ?
+            std::shared_ptr<Quanta::VdbBucket> pPart = partitions_.count(key) ?
                 partitions_[key] : LoadPartition(key);
 
             if (pPart) {
-                std::string label = pPart->vdb->GetTextById(id);
+                std::string label = pPart->GetTextById(id);
                 if (!label.empty()) {
                     retValue = label;
                     return true;
@@ -1245,13 +1154,13 @@ namespace Quanta
         std::vector<std::tuple<unsigned long long, float, std::string, std::string, unsigned long long>> allResults;
 
         // 1. Sequentially load partitions to prevent massive I/O disk thrashing
-        std::vector<std::pair<std::string, std::shared_ptr<Quanta::Partition>>> activePartitions;
+        std::vector<std::pair<std::string, std::shared_ptr<VdbBucket>>> activePartitions;
         activePartitions.reserve(matchingKeys.size());
 
         for (const auto& key : matchingKeys) {
-            std::shared_ptr<Quanta::Partition> pPart = nullptr;
+            std::shared_ptr<VdbBucket> pPart = nullptr;
             {
-                std::unique_lock<std::recursive_mutex> glock(partitions_mutex_);
+                std::lock_guard<std::mutex> glock(partitions_mutex_);
                 pPart = partitions_.count(key) ? partitions_[key] : nullptr;
             }
             if (!pPart) {
@@ -1270,7 +1179,7 @@ namespace Quanta
             const auto& key = activePartitions[i].first;
             auto pPart = activePartitions[i].second;
 
-            auto results = pPart->index->Lookup(query, topK);
+            auto results = pPart->Lookup(query, topK);
 
             // Dedup within this partition if enabled
             if (dedupThreshold > 0.0f && results.size() > 1) {
@@ -1279,7 +1188,7 @@ namespace Quanta
                 std::vector<std::vector<float>> vectors(results.size());
 
                 for (long long j = 0; j < static_cast<long long>(results.size()); ++j) {
-                    vectors[j] = pPart->index->GetVectorById(results[j].first);
+                    vectors[j] = pPart->GetVectorById(results[j].first);
                 }
                 
                 // Get deduplicated indices
@@ -1289,19 +1198,21 @@ namespace Quanta
                 // Add only kept results
                 std::lock_guard<std::mutex> rLock(results_mutex);
                 for (size_t idx : keptIndices) {
-                    unsigned long long extId = pPart->vdb->GetIdByIndex(results[idx].first);
-                    std::string text = pPart->vdb->GetTextById(extId);
-                    unsigned long long tsMs = pPart->vdb->GetTimestampById(extId);
+                    unsigned long long extId = pPart->GetIdByIndex(results[idx].first);
+                    std::string text = pPart->GetTextById(extId);
+                    unsigned long long tsMs = pPart->GetTimestampById(extId);
                     allResults.emplace_back(extId, results[idx].second, text, key, tsMs);
                 }
             }
             else {
                 // No dedup - add all results
                 std::lock_guard<std::mutex> rLock(results_mutex);
-                for (const auto& [internalIdx, score] : results) {
-                    unsigned long long extId = pPart->vdb->GetIdByIndex(internalIdx);
-                    std::string text = pPart->vdb->GetTextById(extId);
-                    unsigned long long tsMs = pPart->vdb->GetTimestampById(extId);
+                for (const auto& res : results) {
+                    unsigned long long internalIdx = res.first;
+                    float score = res.second;
+                    unsigned long long extId = pPart->GetIdByIndex(internalIdx);
+                    std::string text = pPart->GetTextById(extId);
+                    unsigned long long tsMs = pPart->GetTimestampById(extId);
                     allResults.emplace_back(extId, score, text, key, tsMs);
                 }
             }
@@ -1418,12 +1329,10 @@ namespace Quanta
 
         // Try loading from one specific partition key; returns the vector or empty.
         auto tryKey = [&](const std::string& k) -> std::vector<float> {
-            std::shared_ptr<Quanta::Partition> pPart = partitions_.count(k) ?
+            std::shared_ptr<VdbBucket> pPart = partitions_.count(k) ?
                 partitions_[k] : LoadPartition(k);
-            if (!pPart || !pPart->index) return {};
-            auto idx = pPart->vdb->GetIndexById(id);
-            if (idx < 0) return {};
-            return pPart->index->GetVectorById(idx);
+            if (!pPart) return {};
+            return pPart->GetVectorById(id);
         };
 
         // 1. Try the primary key directly.
@@ -1456,9 +1365,12 @@ namespace Quanta
             std::vector<std::string> keys;
 
             // In-memory partitions
-            for (const auto& pkv : partitions_) {
-                if (pkv.first.rfind(keyPrefix, 0) == 0 && pkv.first != fullKey) {
-                    keys.push_back(pkv.first);
+            {
+                std::lock_guard<std::mutex> lock(partitions_mutex_);
+                for (const auto& pkv : partitions_) {
+                    if (pkv.first.rfind(keyPrefix, 0) == 0 && pkv.first != fullKey) {
+                        keys.push_back(pkv.first);
+                    }
                 }
             }
 
@@ -1745,21 +1657,52 @@ namespace Quanta
 
     bool PartitionedVdb::Close()
     {
+        if (is_closed_) return true;
+        is_closed_ = true;
+        std::cout << "[C++] Close() started\n";
         stop_thread_ = true;
+        wals_cv_.notify_all();
+        ingestion_cv_.notify_all();
+
+        std::cout << "[C++] Joining maintenance_thread...\n";
         if (maintenance_thread_.joinable()) {
             maintenance_thread_.join();
         }
+        std::cout << "[C++] Joining ingestion_thread...\n";
+        if (ingestion_thread_.joinable()) {
+            ingestion_thread_.join();
+        }
 
+        std::cout << "[C++] Persisting configs...\n";
         // Persist config and custom partitions to the manifest DB
         UpdateConfigFromMembers();
-        SyncConfigToDB();
+        if (m_config) {
+            m_config->SyncConfigMap(config_);
+            m_config->Close();
+        }
 
-        std::lock_guard<std::recursive_mutex> lock(partitions_mutex_);
-        for (auto& [key, partition] : partitions_) {
-            if (partition->is_dirty_) {
-                SavePartition(partition, key);
+        std::vector<std::pair<std::shared_ptr<VdbBucket>, std::string>> to_save;
+        {
+            std::cout << "[C++] Acquiring map lock...\n";
+            std::lock_guard<std::mutex> lock(partitions_mutex_);
+            for (auto& [key, partition] : partitions_) {
+                if (partition->IsDirty()) {
+                    to_save.push_back({partition, key});
+                }
             }
         }
+
+        std::cout << "[C++] Issuing disk saves for " << to_save.size() << " partitions...\n";
+        // Execute terminal disk saves exclusively completely outside the map lock!
+        for (auto& row : to_save) {
+            std::cout << "[C++] Saving " << row.second << "...\n";
+            SavePartition(row.first, row.second);
+        }
+        {
+            std::lock_guard<std::mutex> lock(partitions_mutex_);
+            partitions_.clear();
+        }
+        std::cout << "[C++] Close() end\n";
         return true;
     }
 
@@ -1772,7 +1715,7 @@ namespace Quanta
         return Close();
     }
 
-    bool PartitionedVdb::SavePartition(std::shared_ptr<Partition> p, const std::string& key)
+    bool PartitionedVdb::SavePartition(std::shared_ptr<VdbBucket> p, const std::string& key)
     {
         if (!p) return false;
         size_t last_under = key.rfind('_');
@@ -1783,24 +1726,16 @@ namespace Quanta
         int customIndex = std::stoi(key.substr(first_under + 1, last_under - first_under - 1));
         std::string bucketStr = key.substr(last_under + 1);
 
-        BucketStorage::SavePhysicalBucket(basePath_, prefix_, p, key);
-        p->is_dirty_ = false;
+        p->Save(basePath_, prefix_); // SQLite params deprecated
+        p->ClearDirty();
 
         long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-        p->last_save_ms_ = now_ms;
+        p->UpdateSaveTime(now_ms);
 
-        // Upsert bounding manifest to SQLite
-        if (m_configDb.IsObject()) {
-            auto statement = m_configDb["statement"];
-            X::Value stat = statement("INSERT OR REPLACE INTO buckets (key, ts_partition, custom_index, bucket_number, ts_start, ts_end) VALUES (?, ?, ?, ?, ?, ?)");
-            stat["bind"](1, key);
-            stat["bind"](2, tsPartition);
-            stat["bind"](3, customIndex);
-            stat["bind"](4, std::stoi(bucketStr));
-            stat["bind"](5, (long long)p->ts_start_.load());
-            stat["bind"](6, (long long)p->ts_end_.load());
-            stat["step"]();
+        // Upsert bounding manifest to SQLite via decoupled config API
+        if (m_config) {
+            m_config->SaveBucketBounds(key, tsPartition, customIndex, std::stoi(bucketStr), p->GetTsStart(), p->GetTsEnd());
         }
 
         return true;
@@ -1810,10 +1745,8 @@ namespace Quanta
     {
         basePath_ = path;
 
-        InitDatabase();
-        LoadConfigFromDB();
-        LoadCustomPartitionsFromDB();
-
+        // DB Config loaded during Init(rt, ...)
+        
         return true;
     }
 
@@ -1850,12 +1783,12 @@ namespace Quanta
                     tags += tag;
                 }
             }
-            info->Set("tags", tags);
+            info->Set("tags", X::Value(tags));
 
             bool loaded = partitions_.count(key) > 0;
             info->Set("loaded", loaded);
             if (loaded) {
-                info->Set("count", static_cast<long long>(partitions_[key]->count));
+                info->Set("count", static_cast<long long>(partitions_[key]->GetCount()));
             }
 
             result->AddItem(info);
@@ -1878,7 +1811,7 @@ namespace Quanta
                 tags += t;
             }
         }
-        info->Set("tags", tags);
+        info->Set("tags", X::Value(tags));
 
         return info;
     }
@@ -1894,8 +1827,9 @@ namespace Quanta
 
     void PartitionedVdb::MaintenanceLoop()
     {
-        X::Value cantor = QuantaHost::I().GetCantor();
-        while (!stop_thread_) {
+        try {
+            X::Value cantor = QuantaHost::I().GetCantor();
+            while (!stop_thread_) {
             size_t peak_queue_size = 0;
             {
                 std::unique_lock<std::mutex> wlock(wals_mutex_);
@@ -1904,7 +1838,10 @@ namespace Quanta
                 });
                 peak_queue_size = pending_wals_.size();
             }
-            if (stop_thread_) break;
+            if (stop_thread_) {
+                std::cout << "[MaintenanceThread] stop_thread_ is true, breaking naturally!\n";
+                break;
+            }
 
             long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
@@ -1913,8 +1850,10 @@ namespace Quanta
             long long memory_vectors = 0;
             long long dirty_partitions = 0;
 
+            std::vector<std::pair<std::shared_ptr<VdbBucket>, std::string>> to_save;
+
             {
-                std::lock_guard<std::recursive_mutex> lock(partitions_mutex_);
+                std::lock_guard<std::mutex> lock(partitions_mutex_);
                 for (auto it = partitions_.begin(); it != partitions_.end(); ) {
                     auto& partition = it->second;
                     bool erased = false;
@@ -1929,21 +1868,21 @@ namespace Quanta
                     int customIndex = std::stoi(it->first.substr(first_under + 1, last_under - first_under - 1));
 
                     // 1. Time-To-Live Eviction: Unload from RAM if idle
-                    long long idle_time_ms = now_ms - partition->last_access_ms_;
+                    long long idle_time_ms = now_ms - partition->GetLastAccessMs();
                     if (ttl_minutes_ > 0 && idle_time_ms > (ttl_minutes_ * 60000LL)) {
-                        // Save first before dropping
-                        if (partition->is_dirty_) {
-                            SavePartition(partition, it->first);
+                        // Queue save first before dropping
+                        if (partition->IsDirty()) {
+                            to_save.push_back({partition, it->first});
                         }
                         it = partitions_.erase(it);
                         erased = true;
                     }
                     
                     // 2. Auto-save if it's dirty and has exceeded the auto-save threshold
-                    if (!erased && partition->is_dirty_ && auto_save_seconds_ > 0) {
-                        long long dirty_age_ms = now_ms - partition->last_save_ms_;
+                    if (!erased && partition->IsDirty() && auto_save_seconds_ > 0) {
+                        long long dirty_age_ms = now_ms - partition->GetLastSaveMs();
                         if (dirty_age_ms > (auto_save_seconds_ * 1000LL)) {
-                            SavePartition(partition, it->first);
+                            to_save.push_back({partition, it->first});
                         }
                     }
 
@@ -1965,14 +1904,19 @@ namespace Quanta
                     if (!erased) {
                         loaded_partitions++;
                         if (partition) {
-                            memory_vectors += partition->count;
-                            if (partition->is_dirty_) {
+                            memory_vectors += partition->GetCount();
+                            if (partition->IsDirty()) {
                                 dirty_partitions++;
                             }
                         }
                         ++it;
                     }
                 }
+            }
+            
+            // Execute massive disk saves in completely isolated thread scopes!!
+            for (auto& row : to_save) {
+                SavePartition(row.first, row.second);
             }
             
             // 3. Process Pending WAL Micro-Batches
@@ -2017,29 +1961,41 @@ namespace Quanta
             }
 
         }
+        std::cout << "[MaintenanceThread] Exited while loop successfully. Thread closing.\n";
+        } catch (const std::exception& e) {
+            std::cout << "[MaintenanceThread] CRITICAL FATAL STD::EXCEPTION CAUGHT! " << e.what() << "\n";
+        } catch (...) {
+            std::cout << "[MaintenanceThread] CRITICAL FATAL UNKNOWN EXCEPTION CAUGHT!\n";
+        }
     }
 
     void PartitionedVdb::ProcessWalFileBuffer(const std::string& target_key, const std::vector<char>& buffer)
     {
-        // Wait for lock to modify
-        std::lock_guard<std::recursive_mutex> plock(partitions_mutex_);
-        std::shared_ptr<Partition> pPart = partitions_.count(target_key) ? partitions_[target_key] : LoadPartition(target_key);
+        std::shared_ptr<VdbBucket> pPart = nullptr;
+        {
+            std::lock_guard<std::mutex> plock(partitions_mutex_);
+            auto it = partitions_.find(target_key);
+            if (it != partitions_.end()) {
+                pPart = it->second;
+            }
+        }
+        
         if (!pPart) {
-            pPart = std::make_shared<Partition>();
-            pPart->vdb = std::make_unique<VectorDatabase>(dimension_);
-            pPart->index = std::make_unique<HnswVdb>(
-                spaceName_, dimension_, maxElements_, M_, efConstruction_, efSearch_);
-            pPart->is_historical_read_ = false;
-            pPart->key_ = target_key;
-            pPart->is_dirty_ = true;
-            
-            long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
-            pPart->last_access_ms_ = now_ms;
-            pPart->last_save_ms_ = now_ms;
-            
-            partitions_[target_key] = pPart;
-            total_buckets_++;
+            pPart = LoadPartition(target_key);
+            if (!pPart) {
+                pPart = std::make_shared<VdbBucket>(dimension_, spaceName_, maxElements_, M_, efConstruction_, efSearch_, target_key);
+                pPart->SetHistoricalRead(false);
+                long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                pPart->UpdateAccessTime(now_ms);
+                pPart->UpdateSaveTime(now_ms);
+                
+                {
+                    std::lock_guard<std::mutex> plock(partitions_mutex_);
+                    partitions_[target_key] = pPart;
+                    total_buckets_++;
+                }
+            }
         }
 
         std::vector<unsigned long long> extIds;
@@ -2052,8 +2008,20 @@ namespace Quanta
 
         while (offset + sizeof(WalRecordHeader) <= total_size) {
             WalRecordHeader header;
+            // Read the header first
             std::memcpy(&header, buffer.data() + offset, sizeof(WalRecordHeader));
             offset += sizeof(WalRecordHeader);
+
+            // Now, re-order the assignment to match AppendWalRecord's write order
+            // 1. Timestamp (already in header.timestamp_ms)
+            // 2. ID (already in header.external_id)
+            // The instruction seems to imply a direct read from buffer, but WalRecordHeader already encapsulates this.
+            // The current code already reads timestamp_ms and external_id from the header.
+            // The instruction's "Currently in ProcessWalFileBuffer" snippet does not match the provided code.
+            // Assuming the intent is to ensure the WalRecordHeader itself has the correct order if it were to be re-defined,
+            // or if the fields were read individually.
+            // Given the current structure, header.timestamp_ms and header.external_id are already available.
+            // The order of assignment to extIds and maxTs below implicitly uses these fields.
 
             size_t vector_bytes = dimension_ * sizeof(float);
             if (offset + vector_bytes > total_size) break; // Incomplete write
@@ -2078,17 +2046,7 @@ namespace Quanta
 
         // Merge organically into active physical layers natively (bypass RAM duplication)
         if (!extIds.empty()) {
-            std::vector<unsigned long long> recIdx = pPart->vdb->AddLabels(extIds, chunkTexts, maxTs);
-            
-            size_t new_total = pPart->vdb->GetSize();
-            if (new_total > pPart->index->GetMaxElements()) {
-                pPart->index->Resize(new_total + 1000);
-            }
-            
-            pPart->index->AddVectors(recIdx, allVectors.data(), allVectors.size(), 1);
-            
-            // Re-sync logical count with physical count (fixes crash recovery without double-counting runtime)
-            pPart->count = pPart->vdb->GetSize();
+            pPart->AddVectorsBatch(extIds, allVectors, chunkTexts, maxTs);
             SavePartition(pPart, target_key);
             
             total_wals_processed_++;

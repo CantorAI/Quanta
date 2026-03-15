@@ -3,6 +3,7 @@
 #include "scene_tracker.h"
 #include <map>
 #include <set>
+#include <unordered_set>
 #include <numeric>
 #include <memory>
 #include <filesystem>
@@ -15,50 +16,21 @@
 
 
 
+#include "vdb_bucket.h"
+#include "vdb_config.h"
+
 namespace Quanta
 {
     namespace fs = std::filesystem;
     class HnswVdb;
     class VectorDatabase;
 
-    // WAL Binary Record Format
-    // We write [WalRecordHeader] + [vector_floats...] + [chunk_text_bytes]
-    #pragma pack(push, 1)
-    struct WalRecordHeader {
-        unsigned long long external_id;
-        unsigned long long timestamp_ms;
-        unsigned int chunk_text_length;
-    };
-    #pragma pack(pop)
-
-    // An in-memory cache of an HNSW partition and its sqlite VDB
-    struct Partition {
-        std::unique_ptr<VectorDatabase> vdb;
-        std::unique_ptr<HnswVdb> index;
-        size_t count = 0;
-        std::string key_;
-        
-        // Tier 3: Time Bounding Box
-        std::atomic<long long> ts_start_{0};
-        std::atomic<long long> ts_end_{0};
-
-        // Dynamic memory eviction metadata
-        std::atomic<bool> is_dirty_{false};
-        std::atomic<bool> is_historical_read_{false};
-        std::atomic<long long> last_access_ms_{0};
-        std::atomic<long long> last_save_ms_{0};
-
-        // WAL Active State
-        std::string active_wal_filename_ = "";
-        std::atomic<int> active_wal_record_count_{0};
-        std::atomic<long long> last_wal_append_ms_{0};
-    };
+    // WalRecordHeader moved to bucket_storage.h
 
     class PartitionedVdb
     {
         friend class SceneTracker;
-        X::Value m_sqlite;
-        X::Value m_configDb;
+        std::unique_ptr<VdbConfig> m_config;
         // Config stored as map, synced to SQLite
         std::map<std::string, std::string> config_;
 
@@ -82,7 +54,7 @@ namespace Quanta
         int max_loaded_read_only_partitions_ = 50;
 
         // Concurrency
-        mutable std::recursive_mutex partitions_mutex_;
+        mutable std::mutex partitions_mutex_;
         std::thread maintenance_thread_;
         std::atomic<bool> stop_thread_{false};
 
@@ -106,7 +78,7 @@ namespace Quanta
         int nextCustomIndex_ = 1;  // 0 = "default"
 
         // Loaded partitions: "2024-01_0" -> Partition
-        std::map<std::string, std::shared_ptr<Partition>> partitions_;
+        std::map<std::string, std::shared_ptr<VdbBucket>> partitions_;
 
         // Type aliases used by the Grouping helpers
         struct GroupingItem {
@@ -115,6 +87,17 @@ namespace Quanta
             std::vector<float> vector;
         };
         using GroupingItemMap = std::map<unsigned long long, GroupingItem>;
+
+        struct AsyncAddTask {
+            long long timestampMs;
+            std::string partitionTag;
+            int numThreads;
+            std::vector<unsigned long long> extIds;
+            std::vector<std::string> chunkTexts;
+            std::vector<float> vectors;
+            size_t n;
+            int dimension;
+        };
 
     public:
         BEGIN_PACKAGE(PartitionedVdb)
@@ -131,7 +114,8 @@ namespace Quanta
         APISET().AddVarClass<SceneTracker, PartitionedVdb>("CreateTracker");
         END_PACKAGE
 
-            PartitionedVdb(X::ARGS& params, X::KWARGS& kwParams);
+        PartitionedVdb() = default;
+        PartitionedVdb(X::ARGS& params, X::KWARGS& kwParams);
         virtual ~PartitionedVdb();
 
         bool Init(X::XRuntime* rt, X::XObj* pContext,
@@ -157,16 +141,18 @@ namespace Quanta
         int GetDimension() const { return dimension_; }
 
     private:
+        std::atomic<bool> is_closed_{false};
+        // Asynchronous Ingestion
+        std::queue<AsyncAddTask> ingestion_queue_;
+        std::mutex ingestion_mutex_;
+        std::condition_variable ingestion_cv_;
+        std::thread ingestion_thread_;
+        void IngestionLoop();
+
         void MaintenanceLoop();
         void StartMaintenanceThread();
         void ProcessWalFile(const std::string& unmerged_wal);
         void ProcessWalFileBuffer(const std::string& target_key, const std::vector<char>& buffer);
-
-        void InitDatabase();
-        void SyncConfigToDB();
-        void LoadConfigFromDB();
-        void LoadCustomPartitionsFromDB();
-        void SaveCustomPartitionToDB(int index, const std::string& tag);
 
         // Config helpers
         void SetConfig(const std::string& key, const std::string& value);
@@ -187,10 +173,10 @@ namespace Quanta
         std::vector<std::string> ScanMatchingPartitions(
             long long tsStartMs, long long tsEndMs,
             const std::set<int>& customIndices);
-
-        std::shared_ptr<Partition> GetOrCreatePartition(const std::string& tsPartition, int customIndex);
-        std::shared_ptr<Partition> LoadPartition(const std::string& key);
-        bool SavePartition(std::shared_ptr<Partition> p, const std::string& key);
+        std::map<std::string, int> highest_buckets_;
+        std::shared_ptr<VdbBucket> GetOrCreatePartition(const std::string& tsPartition, int customIndex);
+        std::shared_ptr<VdbBucket> LoadPartition(const std::string& key);
+        bool SavePartition(std::shared_ptr<VdbBucket> p, const std::string& key);
 
         // File path helpers
         fs::path GetDbPath();
