@@ -31,22 +31,27 @@ namespace Quanta
     };
     #pragma pack(pop)
 
-    // Single partition: index + database
+    // An in-memory cache of an HNSW partition and its sqlite VDB
     struct Partition {
-        std::unique_ptr<HnswVdb> index;
         std::unique_ptr<VectorDatabase> vdb;
+        std::unique_ptr<HnswVdb> index;
         size_t count = 0;
-        std::atomic<long long> last_access_ms_{0};
-        std::atomic<long long> last_save_ms_{0};
         std::string key_;
-        std::atomic<bool> is_dirty_{false};
-        std::atomic<bool> is_historical_read_{false};
+        
+        // Tier 3: Time Bounding Box
         std::atomic<long long> ts_start_{0};
         std::atomic<long long> ts_end_{0};
-        
-        // WAL Tracking per Partition
-        std::string active_wal_filename_;       // Current file being appended to
-        int active_wal_record_count_ = 0;       // Number of vectors in the active file
+
+        // Dynamic memory eviction metadata
+        std::atomic<bool> is_dirty_{false};
+        std::atomic<bool> is_historical_read_{false};
+        std::atomic<long long> last_access_ms_{0};
+        std::atomic<long long> last_save_ms_{0};
+
+        // WAL Active State
+        std::string active_wal_filename_ = "";
+        std::atomic<int> active_wal_record_count_{0};
+        std::atomic<long long> last_wal_append_ms_{0};
     };
 
     class PartitionedVdb
@@ -86,6 +91,7 @@ namespace Quanta
         std::mutex wals_mutex_;
         std::condition_variable wals_cv_;
         int wal_rotation_threshold_ = 100; // Micro-batch size
+        long long wal_cooling_time_seconds_ = 60; // Time without new appends before forcing flush
 
         // Metrics Tracking
         std::atomic<long long> total_lookups_{0};

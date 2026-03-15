@@ -149,6 +149,7 @@ namespace Quanta
         ttl_minutes_ = std::stoll(GetConfig("ttl_minutes", "60"));
         auto_save_seconds_ = std::stoll(GetConfig("auto_save_seconds", "300"));
         max_loaded_read_only_partitions_ = std::stoi(GetConfig("max_loaded_read_only_partitions", "50"));
+        wal_cooling_time_seconds_ = std::stoll(GetConfig("wal_cooling_time_seconds", "60"));
     }
 
     void PartitionedVdb::UpdateConfigFromMembers()
@@ -815,6 +816,7 @@ namespace Quanta
         parseParam("ef_search", "50");
         parseParam("ttl_minutes", "60");
         parseParam("auto_save_seconds", "300");
+        parseParam("wal_cooling_time_seconds", "60");
         SetConfig("next_custom_index", "1");
 
         // Handle dim as alias for dimension
@@ -1007,15 +1009,18 @@ namespace Quanta
         // ==========================================
         {
             std::lock_guard<std::recursive_mutex> lock(partitions_mutex_);
+            long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            
             if (partition->active_wal_filename_.empty()) {
-                long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count();
                 partition->active_wal_filename_ = partition->key_ + ".wal_" + std::to_string(now_ms);
             }
 
             BucketStorage::AppendWalRecord(basePath_, partition, extIds, chunkTexts, timestampMs, rawPtr, n, dimension_);
 
             partition->active_wal_record_count_ += n;
+            partition->last_wal_append_ms_ = now_ms;
+            
             if (partition->active_wal_record_count_ >= wal_rotation_threshold_) {
                 {
                     std::lock_guard<std::mutex> wlock(wals_mutex_);
@@ -1925,6 +1930,21 @@ namespace Quanta
                         long long dirty_age_ms = now_ms - partition->last_save_ms_;
                         if (dirty_age_ms > (auto_save_seconds_ * 1000LL)) {
                             SavePartition(partition, it->first);
+                        }
+                    }
+
+                    // 3. WAL Cooling Time Flush (Force merge if idle)
+                    if (!erased && wal_cooling_time_seconds_ > 0 && !partition->active_wal_filename_.empty()) {
+                        long long idle_wal_ms = now_ms - partition->last_wal_append_ms_;
+                        if (idle_wal_ms > (wal_cooling_time_seconds_ * 1000LL)) {
+                            {
+                                std::lock_guard<std::mutex> wlock(wals_mutex_);
+                                pending_wals_.push(partition->active_wal_filename_);
+                            }
+                            wals_cv_.notify_one();
+                            
+                            partition->active_wal_filename_.clear();
+                            partition->active_wal_record_count_ = 0;
                         }
                     }
 
