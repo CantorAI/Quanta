@@ -144,11 +144,15 @@ namespace Quanta
         X::Value GetHealth();
         X::Value GetTotalRecords();
         X::Value PerformFullScan();
+        void RegMetrics();
 
         // Accessors for SceneTracker
         int GetDimension() const { return dimension_; }
 
     private:
+        X::Value metrics_mgr_;
+        X::Value registerMetrics_;
+        
         std::atomic<bool> is_closed_{false};
         // Asynchronous Ingestion
         std::queue<AsyncAddTask> ingestion_queue_;

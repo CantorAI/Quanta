@@ -746,6 +746,9 @@ namespace Quanta
             
             total_records_ = m_config->GetTotalRecordsCount();
             total_buckets_ = m_config->GetTotalBucketsCount();
+
+            // Dispatch high-throughput metrics callbacks
+            RegMetrics();
         }
 
         // ==========================================
@@ -778,6 +781,48 @@ namespace Quanta
 
         retValue = X::Value(true);
         return true;
+    }
+
+    void PartitionedVdb::RegMetrics()
+    {
+        X::Value cantor = QuantaHost::I().GetCantor();
+        if (!cantor.IsObject()) return;
+
+        metrics_mgr_ = cantor["Metrics"]();
+        registerMetrics_ = metrics_mgr_["registerMetrics"];
+
+        auto regMetric = [cantor, this](const std::string& suffix, auto func) {
+            std::string metricName = prefix_ + "_" + suffix;
+            X::Func metricFetch(metricName.c_str(),
+                (X::U_FUNC)[func](X::XRuntime* rt, X::XObj* pThis, X::XObj* pContext,
+                    X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
+                {
+                    retValue = func();
+                    return true;
+                });
+            registerMetrics_(cantor, metricName, metricFetch);
+        };
+
+        regMetric("active_lookups", [this]() { return active_lookups_.load(); });
+        regMetric("total_lookups", [this]() { return total_lookups_.load(); });
+        regMetric("total_records", [this]() { return total_records_.load(); });
+        regMetric("total_buckets", [this]() { return total_buckets_.load(); });
+        regMetric("max_elements_bound", [this]() { return static_cast<long long>(maxElements_); });
+        
+        regMetric("loaded_buckets", [this]() { 
+            std::lock_guard<std::mutex> lock(partitions_mutex_);
+            return static_cast<long long>(partitions_.size()); 
+        });
+
+        regMetric("pending_wals", [this]() {
+            std::unique_lock<std::mutex> wlock(wals_mutex_);
+            return static_cast<long long>(pending_wals_.size());
+        });
+
+        regMetric("ingestion_queue", [this]() {
+            std::lock_guard<std::mutex> qLock(ingestion_mutex_);
+            return static_cast<long long>(ingestion_queue_.size());
+        });
     }
 
     // ============================================================================
@@ -1986,9 +2031,8 @@ namespace Quanta
             size_t peak_queue_size = 0;
             {
                 std::unique_lock<std::mutex> wlock(wals_mutex_);
-                wals_cv_.wait_for(wlock, std::chrono::milliseconds(5000), [this]() {
-                    return !pending_wals_.empty() || stop_thread_;
-                });
+                // Unconditional wake every 5s ensures LRU read-only TTLs still evaporate during idle periods
+                wals_cv_.wait_for(wlock, std::chrono::milliseconds(5000));
                 peak_queue_size = pending_wals_.size();
             }
             if (stop_thread_) {
