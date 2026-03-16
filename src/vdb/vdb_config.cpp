@@ -15,31 +15,23 @@ namespace Quanta
 
     bool VdbConfig::Init(X::Runtime& rt, const fs::path& basePath, const std::string& prefix, std::map<int, std::set<std::string>>& outCustomPartitions)
     {
-        std::cout << "[VdbConfig] Init Started. rt valid: " << (bool)rt << "\n";
         X::Runtime defaultRt;
         X::Package sqlModule(rt ? rt : defaultRt, "sqlite", "xlang_sqlite");
 
-        std::cout << "[VdbConfig] sqlModule initialized. IsObject: " << sqlModule.IsObject() << "\n";
         if (sqlModule.IsObject())
         {
-            std::cout << "[VdbConfig] Successfully loaded xlang_sqlite module!\n";
             m_sqlite = sqlModule;
             auto UseDatabase = m_sqlite["UseDatabase"];
             std::string dbFile = (basePath / (prefix + "_config.db")).string();
             
-            std::cout << "[VdbConfig] Creating SQLite instance for: " << dbFile << "\n";
             m_configDb = UseDatabase(dbFile);
-            std::cout << "[VdbConfig] SQLite instance IsObject: " << m_configDb.IsObject() << "\n";
             if (m_configDb.IsObject())
             {
                 auto statement = m_configDb["statement"];
-                std::cout << "[VdbConfig] Extracted 'statement' function. Valid: " << statement.IsObject() << "\n";
                 
                 // Initialize configuration table
                 auto stat = statement("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)");
-                std::cout << "[VdbConfig] Created 'stat' object. Valid: " << stat.IsObject() << "\n";
                 stat["step"]();
-                std::cout << "[VdbConfig] DB tables initialized.\n";
 
                 // Initialize custom partitions table
                 auto stat_parts = statement("CREATE TABLE IF NOT EXISTS custom_partitions (id INTEGER PRIMARY KEY, tag TEXT UNIQUE)");
@@ -62,7 +54,7 @@ namespace Quanta
             }
         }
         else {
-            std::cout << "[VdbConfig] FAILED to load xlang_sqlite module!\n";
+            // failed to load
         }
         return false;
     }
@@ -187,6 +179,36 @@ namespace Quanta
         stat["step"]();
         
         return true;
+    }
+
+    void VdbConfig::UpdateTotalRecordsCount(long long totalRecords)
+    {
+        if (!m_configDb.IsObject()) return;
+        auto statement = m_configDb["statement"];
+        auto stat = statement("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)");
+        stat["bind"](1, "TotalRecords");
+        stat["bind"](2, std::to_string(totalRecords));
+        stat["step"]();
+    }
+
+    long long VdbConfig::GetTotalRecordsCount()
+    {
+        if (!m_configDb.IsObject()) return 0;
+        
+        auto statement = m_configDb["statement"];
+        X::Value statusROW = m_sqlite["ROW"];
+        auto stat = statement("SELECT value FROM config WHERE key = ?");
+        stat["bind"](1, "TotalRecords");
+        
+        if (stat["step"]() == statusROW) {
+            std::string valStr = stat["get"](0).ToString();
+            try {
+                return std::stoll(valStr);
+            } catch (...) {
+                return 0;
+            }
+        }
+        return 0;
     }
 
     std::vector<std::string> VdbConfig::ScanMatchingBuckets(long long tsStartMs, long long tsEndMs, const std::set<int>& customIndices)

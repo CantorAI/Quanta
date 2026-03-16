@@ -77,6 +77,12 @@ namespace Quanta
             m_vdbInstances[cacheKey] = pvdb;
         }
 
+        void UnregisterPartitionedVdb(const std::string& path, const std::string& prefix) {
+            std::lock_guard<std::mutex> lock(m_vdbMutex);
+            std::string cacheKey = path + "|" + prefix;
+            m_vdbInstances.erase(cacheKey);
+        }
+
         inline X::Value GetCantor() { return m_cantor; }
 
         inline long long GetContentSize()

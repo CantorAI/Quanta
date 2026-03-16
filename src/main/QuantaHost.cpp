@@ -39,7 +39,7 @@ namespace Quanta
         X::XPackageValue<PartitionedVdb> PVDB;
         X::Value dummyRet;
         bool res = PVDB->Init(rt, pContext, params, kwParams, dummyRet);
-        std::cout << "[QuantaHost] Initial Creation Init() result: " << res << "\n";
+        // Optionally log result
         X::Value varPvdb = PVDB;
 
         m_vdbInstances[cacheKey] = varPvdb;

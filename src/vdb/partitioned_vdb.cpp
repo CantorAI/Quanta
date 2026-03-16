@@ -96,7 +96,6 @@ namespace Quanta
 
     PartitionedVdb::PartitionedVdb(X::ARGS& params, X::KWARGS& kwParams)
     {
-        std::cout << "[PartitionedVdb] Constructor called! params=" << params.size() << " kwargs=" << kwParams.size() << "\n";
         
         std::string path = "";
         std::string prefix = "vdb";
@@ -127,7 +126,6 @@ namespace Quanta
 
     PartitionedVdb::~PartitionedVdb()
     {
-        std::cout << "[PartitionedVdb] DESTRUCTOR called!\n";
         Close();
         
         std::lock_guard<std::mutex> lock(partitions_mutex_);
@@ -619,7 +617,6 @@ namespace Quanta
     bool PartitionedVdb::Init(X::XRuntime* rt, X::XObj* pContext,
         X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
     {
-        std::cout << "[PartitionedVdb] Init() executed!\n";
         // Parse parameters into config map
         auto parseParam = [this, &kwParams](const std::string& key, const std::string& defaultVal) {
             if (auto it = kwParams.find(key.c_str()); it) {
@@ -712,6 +709,8 @@ namespace Quanta
             
             // Pre-load all DB bucket limits instantly into native C++ mapping
             m_config->LoadHighestBucketsMap(highest_buckets_);
+            
+            total_records_ = m_config->GetTotalRecordsCount();
         }
 
         // ==========================================
@@ -794,6 +793,7 @@ namespace Quanta
 
         size_t n = totalCount / dimension_;
         total_add_vectors_ += n;
+        total_records_ += n;
         
         const float* rawPtr = reinterpret_cast<const float*>(vecT->GetData());
 
@@ -862,7 +862,7 @@ namespace Quanta
         auto t1 = std::chrono::high_resolution_clock::now();
         double latency_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         if (n > 0) {
-            std::cout << "[PartitionedVdb] AddVectors queued " << n << " items. Call time: " << latency_ms << " ms\n";
+            // Optional logger integration could go here
         }
 
         retValue = X::Value(lastAssignedId);
@@ -945,7 +945,7 @@ namespace Quanta
 
             auto t1 = std::chrono::high_resolution_clock::now();
             double store_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            std::cout << "[PartitionedVdb] IngestionLoop stored " << task.n << " items to WAL. Write time: " << store_ms << " ms\n";
+            // Optional logger integration could go here
         }
     }
 
@@ -1083,6 +1083,12 @@ namespace Quanta
     void PartitionedVdb::Lookup(X::XRuntime* rt, X::XObj* pContext,
         X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
     {
+        struct ScopedLookup {
+            std::atomic<long long>& active_;
+            ScopedLookup(std::atomic<long long>& a) : active_(a) { active_++; }
+            ~ScopedLookup() { active_--; }
+        } scoped_lookup(active_lookups_);
+        
         total_lookups_++;
         if (params.size() < 2) {
             retValue = X::Value();
@@ -1659,31 +1665,29 @@ namespace Quanta
     {
         if (is_closed_) return true;
         is_closed_ = true;
-        std::cout << "[C++] Close() started\n";
+        
+        QuantaHost::I().UnregisterPartitionedVdb(basePath_.string(), prefix_);
+        
         stop_thread_ = true;
         wals_cv_.notify_all();
         ingestion_cv_.notify_all();
 
-        std::cout << "[C++] Joining maintenance_thread...\n";
         if (maintenance_thread_.joinable()) {
             maintenance_thread_.join();
         }
-        std::cout << "[C++] Joining ingestion_thread...\n";
+        
         if (ingestion_thread_.joinable()) {
             ingestion_thread_.join();
         }
 
-        std::cout << "[C++] Persisting configs...\n";
         // Persist config and custom partitions to the manifest DB
         UpdateConfigFromMembers();
         if (m_config) {
             m_config->SyncConfigMap(config_);
-            m_config->Close();
         }
 
         std::vector<std::pair<std::shared_ptr<VdbBucket>, std::string>> to_save;
         {
-            std::cout << "[C++] Acquiring map lock...\n";
             std::lock_guard<std::mutex> lock(partitions_mutex_);
             for (auto& [key, partition] : partitions_) {
                 if (partition->IsDirty()) {
@@ -1692,17 +1696,20 @@ namespace Quanta
             }
         }
 
-        std::cout << "[C++] Issuing disk saves for " << to_save.size() << " partitions...\n";
         // Execute terminal disk saves exclusively completely outside the map lock!
         for (auto& row : to_save) {
-            std::cout << "[C++] Saving " << row.second << "...\n";
             SavePartition(row.first, row.second);
         }
         {
             std::lock_guard<std::mutex> lock(partitions_mutex_);
             partitions_.clear();
         }
-        std::cout << "[C++] Close() end\n";
+        
+        if (m_config) {
+            m_config->UpdateTotalRecordsCount(total_records_.load());
+            m_config->Close();
+        }
+        
         return true;
     }
 
@@ -1813,7 +1820,115 @@ namespace Quanta
         }
         info->Set("tags", X::Value(tags));
 
+        info->Set("tags", X::Value(tags));
+
         return info;
+    }
+
+    X::Value PartitionedVdb::GetHealth()
+    {
+        X::Dict health;
+        long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        health->Set("timestamp_ms", now_ms);
+        health->Set("is_closed", is_closed_.load());
+        
+        {
+            std::unique_lock<std::mutex> wlock(wals_mutex_);
+            health->Set("pending_wals", static_cast<long long>(pending_wals_.size()));
+        }
+        {
+            std::lock_guard<std::mutex> qLock(ingestion_mutex_);
+            health->Set("ingestion_queue_size", static_cast<long long>(ingestion_queue_.size()));
+        }
+        
+        long long total_wals_on_disk = 0;
+        try {
+            for (const auto& entry : fs::directory_iterator(basePath_)) {
+                if (entry.is_regular_file()) {
+                    std::string fname = entry.path().filename().string();
+                    if (fname.find(".wal_") != std::string::npos) {
+                        total_wals_on_disk++;
+                    }
+                }
+            }
+        } catch (...) {}
+        health->Set("total_wals", total_wals_on_disk);
+
+        long long loaded_buckets = 0;
+        {
+            std::lock_guard<std::mutex> lock(partitions_mutex_);
+            loaded_buckets = partitions_.size();
+        }
+        health->Set("loaded_buckets", loaded_buckets);
+        health->Set("total_buckets", total_buckets_.load());
+        health->Set("active_lookups", active_lookups_.load());
+        health->Set("total_lookups", total_lookups_.load());
+        health->Set("total_add_vectors", total_add_vectors_.load());
+        health->Set("total_wals_processed", total_wals_processed_.load());
+        health->Set("total_wal_vectors_merged", total_wal_vectors_merged_.load());
+        
+        return health;
+    }
+
+    X::Value PartitionedVdb::GetTotalRecords()
+    {
+        return X::Value(total_records_.load());
+    }
+
+    X::Value PartitionedVdb::PerformFullScan()
+    {
+        // A full scan to find total vectors, wals, buckets from disk.
+        X::Dict scanResult;
+        long long total_vectors = 0;
+        long long total_wals = 0;
+        long long total_wal_files_found = 0;
+        long long total_buckets = 0;
+        long long total_partitions = 0;
+        
+        std::set<int> emptySet;
+        std::vector<std::string> allKeys = ScanMatchingPartitions(0, LLONG_MAX, emptySet);
+        total_partitions = allKeys.size();
+
+        for (const auto& key : allKeys) {
+            std::shared_ptr<VdbBucket> pPart = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(partitions_mutex_);
+                auto it = partitions_.find(key);
+                if (it != partitions_.end()) {
+                    pPart = it->second;
+                }
+            }
+            
+            if (pPart) {
+                total_vectors += pPart->GetCount();
+                total_buckets++;
+            } else {
+                pPart = LoadPartition(key);
+                if (pPart) {
+                    total_vectors += pPart->GetCount();
+                    total_buckets++;
+                }
+            }
+        }
+        
+        for (const auto& entry : fs::directory_iterator(basePath_)) {
+            if (entry.is_regular_file()) {
+                std::string fname = entry.path().filename().string();
+                if (fname.find(".wal_") != std::string::npos) {
+                    total_wal_files_found++;
+                    // Optional: open WAL and count records
+                    // Currently just counting files
+                }
+            }
+        }
+        
+        scanResult->Set("total_vectors", total_vectors);
+        scanResult->Set("total_wal_files", total_wal_files_found);
+        scanResult->Set("total_buckets", total_buckets);
+        scanResult->Set("total_partitions", total_partitions);
+
+        return scanResult;
     }
 
     // ============================================================================
@@ -1829,6 +1944,7 @@ namespace Quanta
     {
         try {
             X::Value cantor = QuantaHost::I().GetCantor();
+            long long last_config_save_ms = 0;
             while (!stop_thread_) {
             size_t peak_queue_size = 0;
             {
@@ -1839,7 +1955,7 @@ namespace Quanta
                 peak_queue_size = pending_wals_.size();
             }
             if (stop_thread_) {
-                std::cout << "[MaintenanceThread] stop_thread_ is true, breaking naturally!\n";
+                // Stop naturally
                 break;
             }
 
@@ -1849,11 +1965,13 @@ namespace Quanta
             long long loaded_partitions = 0;
             long long memory_vectors = 0;
             long long dirty_partitions = 0;
+            long long total_records = 0; // Total overall vectors (including disk estimation)
 
             std::vector<std::pair<std::shared_ptr<VdbBucket>, std::string>> to_save;
 
             {
                 std::lock_guard<std::mutex> lock(partitions_mutex_);
+
                 for (auto it = partitions_.begin(); it != partitions_.end(); ) {
                     auto& partition = it->second;
                     bool erased = false;
@@ -1946,26 +2064,49 @@ namespace Quanta
                 X::Value SetWordBook = metrics["SetWordBook"];
                 std::string namespace_name = "PartitionedVdb_" + basePath_.filename().string();
                 
-                SetWordBook(namespace_name, "LoadedPartitions", X::Value(loaded_partitions));
+                SetWordBook(namespace_name, "LoadedBuckets", X::Value(loaded_partitions));
                 SetWordBook(namespace_name, "MemoryVectors", X::Value(memory_vectors));
-                SetWordBook(namespace_name, "DirtyPartitions", X::Value(dirty_partitions));
+                
+                long long total_wals_on_disk = 0;
+                try {
+                    for (const auto& entry : fs::directory_iterator(basePath_)) {
+                        if (entry.is_regular_file()) {
+                            std::string fname = entry.path().filename().string();
+                            if (fname.find(".wal_") != std::string::npos) {
+                                total_wals_on_disk++;
+                            }
+                        }
+                    }
+                } catch (...) {}
+                SetWordBook(namespace_name, "TotalWals", X::Value(total_wals_on_disk));
                 SetWordBook(namespace_name, "PendingWals", X::Value((long long)peak_queue_size));
                 
                 SetWordBook(namespace_name, "TotalBuckets", X::Value((long long)total_buckets_));
                 SetWordBook(namespace_name, "TotalWalsProcessed", X::Value((long long)total_wals_processed_));
                 SetWordBook(namespace_name, "TotalWalVectorsMerged", X::Value((long long)total_wal_vectors_merged_));
                 
+                SetWordBook(namespace_name, "ActiveLookups", X::Value((long long)active_lookups_.load()));
+                // Publish telemetry if Cantor server is registered
                 SetWordBook(namespace_name, "TotalLookups", X::Value((long long)total_lookups_));
                 SetWordBook(namespace_name, "TotalAddVectors", X::Value((long long)total_add_vectors_));
                 SetWordBook(namespace_name, "TotalGroupings", X::Value((long long)total_grouping_));
+                SetWordBook(namespace_name, "TotalRecords", X::Value((long long)total_records_.load()));
+            }
+
+            // Save to ConfigDB for persistence (run max once every 5 seconds)
+            if (m_config) {
+                if (now_ms - last_config_save_ms > 5000) {
+                    m_config->UpdateTotalRecordsCount(total_records_.load());
+                    last_config_save_ms = now_ms;
+                }
             }
 
         }
-        std::cout << "[MaintenanceThread] Exited while loop successfully. Thread closing.\n";
+        // Thread exited successfully
         } catch (const std::exception& e) {
-            std::cout << "[MaintenanceThread] CRITICAL FATAL STD::EXCEPTION CAUGHT! " << e.what() << "\n";
+            // Optional logger could record generic exception here
         } catch (...) {
-            std::cout << "[MaintenanceThread] CRITICAL FATAL UNKNOWN EXCEPTION CAUGHT!\n";
+            // Optional logger could record unknown exception here
         }
     }
 

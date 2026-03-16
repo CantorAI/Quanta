@@ -35,8 +35,10 @@ namespace Quanta
         
         // Returns: ts_start, ts_end
         bool LoadBucketBounds(const std::string& key, long long& outStart, long long& outEnd);
-        
         bool SaveBucketBounds(const std::string& key, const std::string& tsPartition, int customIndex, int bucketNum, long long tsStart, long long tsEnd);
+
+        long long GetTotalRecordsCount();
+        void UpdateTotalRecordsCount(long long totalRecords);
 
         // Returns bucket keys overlapping the time window mathematically
         std::vector<std::string> ScanMatchingBuckets(long long tsStartMs, long long tsEndMs, const std::set<int>& customIndices);

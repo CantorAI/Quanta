@@ -66,10 +66,12 @@ namespace Quanta
         long long wal_cooling_time_seconds_ = 60; // Time without new appends before forcing flush
 
         // Metrics Tracking
+        std::atomic<long long> active_lookups_{0};
         std::atomic<long long> total_lookups_{0};
         std::atomic<long long> total_add_vectors_{0};
         std::atomic<long long> total_grouping_{0};
         std::atomic<long long> total_buckets_{0};
+        std::atomic<long long> total_records_{0};
         std::atomic<long long> total_wals_processed_{0};
         std::atomic<long long> total_wal_vectors_merged_{0};
         // Custom partitions: index -> tags
@@ -111,6 +113,9 @@ namespace Quanta
         APISET().AddVarFunc("QueryLabelByID", &PartitionedVdb::QueryLabelByID);
         APISET().AddVarFunc("Grouping", &PartitionedVdb::Grouping);
         APISET().AddFunc<1>("GetPartitionInfo", &PartitionedVdb::GetPartitionInfo);
+        APISET().AddFunc<0>("GetHealth", &PartitionedVdb::GetHealth);
+        APISET().AddFunc<0>("GetTotalRecords", &PartitionedVdb::GetTotalRecords);
+        APISET().AddFunc<0>("PerformFullScan", &PartitionedVdb::PerformFullScan);
         APISET().AddVarClass<SceneTracker, PartitionedVdb>("CreateTracker");
         END_PACKAGE
 
@@ -136,6 +141,9 @@ namespace Quanta
         bool AddPartitionTag(int index, const std::string& tag);
         X::Value ListPartitions();
         X::Value GetPartitionInfo(const std::string& tag);
+        X::Value GetHealth();
+        X::Value GetTotalRecords();
+        X::Value PerformFullScan();
 
         // Accessors for SceneTracker
         int GetDimension() const { return dimension_; }
