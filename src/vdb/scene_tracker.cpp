@@ -195,8 +195,10 @@ namespace Quanta
             X::Value emb = it->val;
             if (emb.IsTensor()) {
                 X::Tensor tensor(emb);
-                long long arySize = tensor->GetDimSize(0);
-                float* t = (float*)tensor->GetData();
+                X::Value vecValFloat = tensor->ToType(X::TensorDataType::FLOAT);
+                X::Tensor tensorFloat(vecValFloat);
+                long long arySize = tensorFloat->GetDimSize(0);
+                float* t = (float*)tensorFloat->GetData();
                 vec.assign(t, t + arySize);
             } else if (emb.IsList()) {
                 X::List list(emb);
