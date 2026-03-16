@@ -72,23 +72,27 @@ namespace Quanta
         return true;
     }
 
-    void VdbConfig::SyncConfigMap(std::map<std::string, std::string>& inOutConfigMap)
+    void VdbConfig::LoadConfigToMap(std::map<std::string, std::string>& outConfigMap)
     {
         if (!m_configDb.IsObject()) return;
         
         auto statement = m_configDb["statement"];
         X::Value statusROW = m_sqlite["ROW"];
         
-        // Load whatever exists in DB first
         auto stat_read = statement("SELECT key, value FROM config");
         while (stat_read["step"]() == statusROW) {
             std::string k = stat_read["get"](0).ToString();
             std::string v = stat_read["get"](1).ToString();
-            inOutConfigMap[k] = v; // Overwrite RAM with DB source of truth
+            outConfigMap[k] = v;
         }
+    }
+
+    void VdbConfig::SaveConfigFromMap(const std::map<std::string, std::string>& inConfigMap)
+    {
+        if (!m_configDb.IsObject()) return;
         
-        // Upsert all current RAM values back to ensure defaults are saved
-        for (const auto& [k, v] : inOutConfigMap) {
+        auto statement = m_configDb["statement"];
+        for (const auto& [k, v] : inConfigMap) {
             auto stat_write = statement("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)");
             stat_write["bind"](1, k);
             stat_write["bind"](2, v);

@@ -109,8 +109,8 @@ namespace Quanta
 
         bool isNew = !QuantaHost::I().HasPartitionedVdb(path, prefix);
 
-        // If params/kwargs provided, call Init
-        if (isNew && (params.size() > 0 || kwParams.size() > 0)) {
+        // Always bootstrap the config for brand new instances, even if parameters are fully empty (e.g., lookups)
+        if (isNew) {
             X::Value retValue;
             Init(nullptr, nullptr, params, kwParams, retValue);
             X::XPackageValue<PartitionedVdb> PVDB(this);
@@ -341,7 +341,7 @@ namespace Quanta
         if (m_config) m_config->SaveCustomPartitionToDB(idx, tag);
         SetConfig("next_custom_index", std::to_string(nextCustomIndex_));
         if (m_config) {
-            m_config->SyncConfigMap(config_);
+            m_config->SaveConfigFromMap(config_);
         }
 
         return idx;
@@ -628,16 +628,6 @@ namespace Quanta
     bool PartitionedVdb::Init(X::XRuntime* rt, X::XObj* pContext,
         X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
     {
-        // Parse parameters into config map
-        auto parseParam = [this, &kwParams](const std::string& key, const std::string& defaultVal) {
-            if (auto it = kwParams.find(key.c_str()); it) {
-                SetConfig(key, it->val.ToString());
-            }
-            else {
-                SetConfig(key, defaultVal);
-            }
-            };
-
         // Required: prefix
         if (auto it = kwParams.find("prefix"); it) {
             prefix_ = it->val.ToString();
@@ -664,6 +654,35 @@ namespace Quanta
         // Create directory immediately so SQLite can bind to the file
         fs::create_directories(basePath_);
 
+        // 1. Initialize configuration manager and load saved DB config first!
+        m_config = std::make_unique<VdbConfig>();
+        X::Runtime runtimeWrapper;
+        if (rt != nullptr) {
+            runtimeWrapper = X::Runtime(rt);
+        }
+        bool db_ready = m_config->Init(runtimeWrapper, basePath_, prefix_, customPartitionTags_);
+        if (db_ready) {
+            m_config->LoadConfigToMap(config_);
+        }
+
+        // 2. Parse explicit parameters into config map - EXPLICIT kwargs OVERRIDE DB!
+        auto parseParam = [this, &kwParams](const std::string& key, const std::string& defaultVal) {
+            if (auto it = kwParams.find(key.c_str()); it) {
+                SetConfig(key, it->val.ToString());
+            }
+            else {
+                // If not in kwargs and not loaded from DB, use generic default
+                if (config_.find(key) == config_.end()) {
+                    SetConfig(key, defaultVal);
+                }
+            }
+        };
+
+        // Handle dim as alias for dimension
+        if (auto it = kwParams.find("dim"); it) {
+            SetConfig("dimension", it->val.ToString());
+        }
+
         // Optional parameters with defaults
         parseParam("dimension", "512");
         parseParam("granularity", "hourly");
@@ -676,17 +695,15 @@ namespace Quanta
         parseParam("ttl_minutes", "60");
         parseParam("auto_save_seconds", "300");
         parseParam("wal_cooling_time_seconds", "60");
-        SetConfig("next_custom_index", "1");
-
-        // Handle dim as alias for dimension
-        if (auto it = kwParams.find("dim"); it) {
-            SetConfig("dimension", it->val.ToString());
+        
+        if (config_.find("next_custom_index") == config_.end()) {
+            SetConfig("next_custom_index", "1");
         }
 
-        // Apply config to member variables
+        // 3. Apply fully resolved config to member variables (now safely uses loaded maxMemoryGb_)
         ApplyConfigToMembers();
 
-        // Calculate safe bucket max_elements_ from user's max_memory_gb_
+        // 4. Calculate safe bucket max_elements_ from properly resolved maxMemoryGb_
         size_t bytes_per_vector = dimension_ * sizeof(float);
         size_t graph_overhead = M_ * sizeof(int) * 2; 
         size_t metadata_overhead = 256; 
@@ -695,13 +712,7 @@ namespace Quanta
         maxElements_ = bytes_limit / total_bytes_per_vector;
         if (maxElements_ < 1000) maxElements_ = 1000; // Hard minimum safety
 
-        // Initialize configuration manager and sync
-        m_config = std::make_unique<VdbConfig>();
-        X::Runtime runtimeWrapper;
-        if (rt != nullptr) {
-            runtimeWrapper = X::Runtime(rt);
-        }
-        if (m_config->Init(runtimeWrapper, basePath_, prefix_, customPartitionTags_)) {
+        if (db_ready) {
             // Rebuild reverse lookup
             tagToIndex_.clear();
             for (const auto& [idx, tagSet] : customPartitionTags_) {
@@ -714,9 +725,8 @@ namespace Quanta
                 tagToIndex_["default"] = 0;
             }
 
-            // Sync RAM config natively with DB
-            m_config->SyncConfigMap(config_);
-            ApplyConfigToMembers();
+            // Sync successfully resolved config natively back to DB
+            m_config->SaveConfigFromMap(config_);
             
             // Pre-load all DB bucket limits instantly into native C++ mapping
             m_config->LoadHighestBucketsMap(highest_buckets_);
@@ -1695,7 +1705,7 @@ namespace Quanta
         // Persist config and custom partitions to the manifest DB
         UpdateConfigFromMembers();
         if (m_config) {
-            m_config->SyncConfigMap(config_);
+            m_config->SaveConfigFromMap(config_);
         }
 
         std::vector<std::pair<std::shared_ptr<VdbBucket>, std::string>> to_save;
@@ -1875,6 +1885,7 @@ namespace Quanta
         }
         health->Set("loaded_buckets", loaded_buckets);
         health->Set("total_buckets", total_buckets_.load());
+        health->Set("max_elements_bound", static_cast<long long>(maxElements_));
         health->Set("active_lookups", active_lookups_.load());
         health->Set("total_lookups", total_lookups_.load());
         health->Set("total_add_vectors", total_add_vectors_.load());

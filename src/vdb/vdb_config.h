@@ -25,7 +25,8 @@ namespace Quanta
         // Config Key/Value Settings
         std::string GetConfig(const std::string& key, const std::string& defaultVal = "");
         void SetConfig(const std::string& key, const std::string& value);
-        void SyncConfigMap(std::map<std::string, std::string>& inOutConfigMap);
+        void LoadConfigToMap(std::map<std::string, std::string>& outConfigMap);
+        void SaveConfigFromMap(const std::map<std::string, std::string>& inConfigMap);
 
         // Custom Layout Management
         void SaveCustomPartitionToDB(int index, const std::string& tag);
