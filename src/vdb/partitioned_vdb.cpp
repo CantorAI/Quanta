@@ -703,14 +703,27 @@ namespace Quanta
         // 3. Apply fully resolved config to member variables (now safely uses loaded maxMemoryGb_)
         ApplyConfigToMembers();
 
-        // 4. Calculate safe bucket max_elements_ from properly resolved maxMemoryGb_
-        size_t bytes_per_vector = dimension_ * sizeof(float);
-        size_t graph_overhead = M_ * sizeof(int) * 2; 
-        size_t metadata_overhead = 256; 
-        size_t total_bytes_per_vector = bytes_per_vector + graph_overhead + metadata_overhead;
-        size_t bytes_limit = static_cast<size_t>(maxMemoryGb_ * 1024.0f * 1024.0f * 1024.0f);
-        maxElements_ = bytes_limit / total_bytes_per_vector;
-        if (maxElements_ < 1000) maxElements_ = 1000; // Hard minimum safety
+        // 4. Determine bucket max_elements_. Prioritize exact DB value over dynamic recalculations.
+        if (config_.find("max_elements") != config_.end()) {
+            try {
+                maxElements_ = std::stoull(config_["max_elements"]);
+            } catch (...) {
+                maxElements_ = 1000;
+            }
+        } 
+        else {
+            // First boot or missing config: Calculate safe bucket max_elements_ from user's maxMemoryGb_
+            size_t bytes_per_vector = dimension_ * sizeof(float);
+            size_t graph_overhead = M_ * sizeof(int) * 2; 
+            size_t metadata_overhead = 256; 
+            size_t total_bytes_per_vector = bytes_per_vector + graph_overhead + metadata_overhead;
+            size_t bytes_limit = static_cast<size_t>(maxMemoryGb_ * 1024.0f * 1024.0f * 1024.0f);
+            maxElements_ = bytes_limit / total_bytes_per_vector;
+            if (maxElements_ < 1000) maxElements_ = 1000; // Hard minimum safety
+            
+            // Permanently lock this absolute mathematical boundary into the RAM map for immediate SQLite saving
+            SetConfig("max_elements", std::to_string(maxElements_));
+        }
 
         if (db_ready) {
             // Rebuild reverse lookup
