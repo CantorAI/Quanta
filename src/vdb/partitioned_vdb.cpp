@@ -2043,6 +2043,34 @@ namespace Quanta
                         ++it;
                     }
                 }
+
+                // 4. LRU Read-Only Capacity Eviction
+                if (max_loaded_read_only_partitions_ > 0) {
+                    std::vector<std::pair<std::string, long long>> readOnlyPartitions;
+                    for (const auto& [k, p] : partitions_) {
+                        if (p && p->IsHistoricalRead()) {
+                            readOnlyPartitions.push_back({k, p->GetLastAccessMs()});
+                        }
+                    }
+                    if (readOnlyPartitions.size() > max_loaded_read_only_partitions_) {
+                        std::sort(readOnlyPartitions.begin(), readOnlyPartitions.end(), [](const auto& a, const auto& b) {
+                            return a.second < b.second; // Oldest first
+                        });
+                        int to_drop = readOnlyPartitions.size() - max_loaded_read_only_partitions_;
+                        for (int i = 0; i < to_drop; ++i) {
+                            auto& drop_key = readOnlyPartitions[i].first;
+                            auto p = partitions_[drop_key];
+                            if (p && p->IsDirty()) {
+                                to_save.push_back({p, drop_key});
+                            }
+                            if (p) {
+                                memory_vectors -= p->GetCount();
+                                loaded_partitions--;
+                            }
+                            partitions_.erase(drop_key);
+                        }
+                    }
+                }
             }
             
             // Execute massive disk saves in completely isolated thread scopes!!
