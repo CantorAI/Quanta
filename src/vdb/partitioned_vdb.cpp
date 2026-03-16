@@ -451,6 +451,17 @@ namespace Quanta
                 }
                 
                 if (partition->GetTotalInsertedCount() >= maxElements_) {
+                    bool need_save = false;
+                    {
+                        std::lock_guard<std::mutex> plock(partition->GetLock());
+                        if (!partition->IsHistoricalRead()) {
+                            need_save = true;
+                            partition->SetHistoricalRead(true);
+                        }
+                    }
+                    if (need_save) {
+                        SavePartition(partition, key);
+                    }
                     activeBucketNum++;
                     {
                         std::lock_guard<std::mutex> lock(partitions_mutex_);
