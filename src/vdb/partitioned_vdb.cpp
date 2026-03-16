@@ -722,6 +722,7 @@ namespace Quanta
             m_config->LoadHighestBucketsMap(highest_buckets_);
             
             total_records_ = m_config->GetTotalRecordsCount();
+            total_buckets_ = m_config->GetTotalBucketsCount();
         }
 
         // ==========================================
@@ -1718,6 +1719,7 @@ namespace Quanta
         
         if (m_config) {
             m_config->UpdateTotalRecordsCount(total_records_.load());
+            m_config->UpdateMetricValue("TotalBuckets", total_buckets_.load());
             m_config->Close();
         }
         
@@ -2108,6 +2110,7 @@ namespace Quanta
             if (m_config) {
                 if (now_ms - last_config_save_ms > 5000) {
                     m_config->UpdateTotalRecordsCount(total_records_.load());
+                    m_config->UpdateMetricValue("TotalBuckets", total_buckets_.load());
                     last_config_save_ms = now_ms;
                 }
             }

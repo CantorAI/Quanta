@@ -183,22 +183,46 @@ namespace Quanta
 
     void VdbConfig::UpdateTotalRecordsCount(long long totalRecords)
     {
-        if (!m_configDb.IsObject()) return;
-        auto statement = m_configDb["statement"];
-        auto stat = statement("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)");
-        stat["bind"](1, "TotalRecords");
-        stat["bind"](2, std::to_string(totalRecords));
-        stat["step"]();
+        UpdateMetricValue("TotalRecords", totalRecords);
     }
 
     long long VdbConfig::GetTotalRecordsCount()
+    {
+        return GetMetricValue("TotalRecords");
+    }
+
+    long long VdbConfig::GetTotalBucketsCount()
+    {
+        if (!m_configDb.IsObject()) return 0;
+        
+        auto statement = m_configDb["statement"];
+        X::Value statusROW = m_sqlite["ROW"];
+        auto stat = statement("SELECT COUNT(*) FROM partitions");
+        
+        if (stat["step"]() == statusROW) {
+            return stat["get"](0).ToLongLong();
+        }
+        return 0;
+    }
+
+    void VdbConfig::UpdateMetricValue(const std::string& key, long long value)
+    {
+        if (!m_configDb.IsObject()) return;
+        auto statement = m_configDb["statement"];
+        auto stat = statement("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)");
+        stat["bind"](1, key);
+        stat["bind"](2, std::to_string(value));
+        stat["step"]();
+    }
+
+    long long VdbConfig::GetMetricValue(const std::string& key)
     {
         if (!m_configDb.IsObject()) return 0;
         
         auto statement = m_configDb["statement"];
         X::Value statusROW = m_sqlite["ROW"];
         auto stat = statement("SELECT value FROM config WHERE key = ?");
-        stat["bind"](1, "TotalRecords");
+        stat["bind"](1, key);
         
         if (stat["step"]() == statusROW) {
             std::string valStr = stat["get"](0).ToString();

@@ -39,6 +39,10 @@ namespace Quanta
 
         long long GetTotalRecordsCount();
         void UpdateTotalRecordsCount(long long totalRecords);
+        
+        long long GetTotalBucketsCount();
+        long long GetMetricValue(const std::string& key);
+        void UpdateMetricValue(const std::string& key, long long value);
 
         // Returns bucket keys overlapping the time window mathematically
         std::vector<std::string> ScanMatchingBuckets(long long tsStartMs, long long tsEndMs, const std::set<int>& customIndices);
