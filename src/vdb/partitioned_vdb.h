@@ -148,6 +148,7 @@ namespace Quanta
 
         // Accessors for SceneTracker
         int GetDimension() const { return dimension_; }
+        std::string GetBasePath() const { return basePath_.string(); }
 
     private:
         X::Value metrics_mgr_;

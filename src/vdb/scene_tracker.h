@@ -4,6 +4,7 @@
 #include <string>
 #include <cmath>
 #include <mutex>
+#include <deque>
 
 namespace Quanta
 {
@@ -21,15 +22,22 @@ namespace Quanta
     };
 
     // Single-stream scene tracker (one per IPC, Python manages per-device dict).
-    // Created via vdb.CreateTracker(threshold=0.85)
     // Uses AddVarClass<SceneTracker, PartitionedVdb> pattern:
     //   parent VDB* is auto-extracted from context.
     class SceneTracker
     {
         PartitionedVdb* vdb_ = nullptr;
+        
+        // Algorithms Configuration
         float threshold_ = 0.85f;
         int dimension_ = 0;
+        std::string method_ = "window"; // "centroid" or "window"
+        int window_size_ = 15;            // Max frames for sliding window
+        std::string tracker_id_ = "";     // Device ID for disk serialization
+        
+        // Live state
         SceneState state_;
+        std::deque<std::vector<float>> window_history_;
         std::mutex tracker_mutex_;
 
     public:
@@ -45,7 +53,7 @@ namespace Quanta
 
         // Append a new frame
         // params[0] = image_id (long long)
-        // kwargs: timestamp, partitionTag, score
+        // kwargs: timestamp, partitionTag, score, embedding
         void Append(X::XRuntime* rt, X::XObj* pContext,
             X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
 
@@ -56,5 +64,9 @@ namespace Quanta
         static float NormalizeVec(std::vector<float>& vec);
         X::Value BuildResult(bool isNewScene, float similarity,
             const SceneState* completedScene = nullptr);
+
+        // Crash Resilience (Automated Native I/O)
+        void LoadState();
+        void SaveState();
     };
 }
