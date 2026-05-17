@@ -300,7 +300,7 @@ results = vdb.Lookup(text_to_embedding("person"), 5,
 | `space` | `"l2"` | Distance metric: `l2`, `ip` (inner product), `cosine` |
 | `max_memory_gb` | `1.0` | Peak memory allowance per partition graph |
 | `max_loaded_read_only_partitions` | `50` | LRU Eviction Quota: Maximum historical query graphs allowed in memory |
-| `ttl_minutes` | `60` | Idle time before a partition is autonomously offloaded from RAM |
+| `ttl_minutes` | `3` | Idle time before a partition is autonomously offloaded from RAM |
 | `auto_save_seconds`| `300` | Autonomous background thread save interval (seconds) |
 | `M` | `16` | HNSW graph connectivity |
 | `ef_construction` | `200` | HNSW build-time search depth |
@@ -318,7 +318,7 @@ If an active bucket crosses this byte limit, Quanta automatically seals `_0000.h
 - **User Impact:** Even 100 parallel IPC cameras logging huge traffic spikes are structurally protected from ever overloading server memory allocations natively.
 
 ### Auto-Cleanup (TTL) and LRU Quotas
-- **Time-To-Live (TTL)**: Actively writing buckets are instantly cleared if idle without queries for `ttl_minutes` (default: 60 minutes), strictly capping peak ingress RAM to immediate camera hours.
+- **Time-To-Live (TTL)**: Actively writing buckets are instantly cleared if idle without queries for `ttl_minutes` (default: 3 minutes), strictly capping peak ingress RAM to immediate camera hours.
 - **LRU Read-Only Eviction**: If a cross-month global forensic search forces hundreds of historical graph hydrations, they are strictly throttled by the `max_loaded_read_only_partitions` sandbox (Default: 50 limit). The engine enforces LRU (Least-Recently-Used) swapping upon historical files synchronously with disk loads, securing the engine against query spikes.
 - **Dirty Partitions**: You never call `vdb.Save()`. Every `auto_save_seconds`, a C++ thread pushes pending ingestion data seamlessly. Call `vdb.Close()` for safe shutdown.
 

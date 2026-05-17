@@ -49,7 +49,7 @@ namespace Quanta
         int efSearch_ = 50;
 
         // Maintenance and TTL configuration
-        long long ttl_minutes_ = 60;
+        long long ttl_minutes_ = 3;
         long long auto_save_seconds_ = 300;
         int max_loaded_read_only_partitions_ = 50;
 

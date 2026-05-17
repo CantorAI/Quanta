@@ -76,7 +76,7 @@ As the API receives millions of vectors, `PartitionedVdb` writes them exclusivel
 ### B. Time-To-Live Memory Eviction (TTL)
 While `Lazy Loading` defends against OOM crashes during boot sequences, the TTL logic defends against OOM crashes during sustained uptime operations.
 - Every `Partition` continuously tracks its `last_access_ms`. 
-- If a camera stream writes heavily for an hour, but is then paused, the background thread will notice that the `idle_time_ms` has surpassed `ttl_minutes_` (default: 60 minutes).
+- If a camera stream writes heavily for an hour, but is then paused, the background thread will notice that the `idle_time_ms` has surpassed `ttl_minutes_` (default: 3 minutes).
 - The thread will instantly lock the index, confirm it is flushed to disk, and execute `partitions_.erase()`, surgically nuking the 1GB payload from system RAM. 
 
 ---

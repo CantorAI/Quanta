@@ -158,7 +158,7 @@ namespace Quanta
         efConstruction_ = std::stoi(GetConfig("ef_construction", "200"));
         efSearch_ = std::stoi(GetConfig("ef_search", "50"));
         nextCustomIndex_ = std::stoi(GetConfig("next_custom_index", "1"));
-        ttl_minutes_ = std::stoll(GetConfig("ttl_minutes", "60"));
+        ttl_minutes_ = std::stoll(GetConfig("ttl_minutes", "3"));
         auto_save_seconds_ = std::stoll(GetConfig("auto_save_seconds", "300"));
         max_loaded_read_only_partitions_ = std::stoi(GetConfig("max_loaded_read_only_partitions", "50"));
         wal_cooling_time_seconds_ = std::stoll(GetConfig("wal_cooling_time_seconds", "60"));
@@ -692,7 +692,7 @@ namespace Quanta
         parseParam("M", "16");
         parseParam("ef_construction", "200");
         parseParam("ef_search", "50");
-        parseParam("ttl_minutes", "60");
+        parseParam("ttl_minutes", "3");
         parseParam("auto_save_seconds", "300");
         parseParam("wal_cooling_time_seconds", "60");
         
