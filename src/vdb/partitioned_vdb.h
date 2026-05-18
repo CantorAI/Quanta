@@ -116,6 +116,7 @@ namespace Quanta
         APISET().AddFunc<0>("GetHealth", &PartitionedVdb::GetHealth);
         APISET().AddFunc<0>("GetTotalRecords", &PartitionedVdb::GetTotalRecords);
         APISET().AddFunc<0>("PerformFullScan", &PartitionedVdb::PerformFullScan);
+        APISET().AddFunc<1>("SetTTL", &PartitionedVdb::SetTTL);
         APISET().AddVarClass<SceneTracker, PartitionedVdb>("CreateTracker");
         END_PACKAGE
 
@@ -144,6 +145,7 @@ namespace Quanta
         X::Value GetHealth();
         X::Value GetTotalRecords();
         X::Value PerformFullScan();
+        bool SetTTL(long long ttlMinutes);
         void RegMetrics();
 
         // Accessors for SceneTracker

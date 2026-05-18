@@ -856,17 +856,36 @@ namespace Quanta
 
         // Validate basic dimensions and setup vector parsing for queue
         X::Value vecVal = params[1];
-        if (!vecVal.IsTensor()) {
-            retValue = X::Value(false);
-            return;
+        long long totalCount = 0;
+        std::vector<float> data;
+        const float* rawPtr = nullptr;
+
+        if (vecVal.IsTensor()) {
+            X::Tensor vecT0(vecVal);
+            X::Value vecValCont = vecVal;
+            if (vecT0->GetDataType() != X::TensorDataType::FLOAT) {
+                vecValCont = vecT0->ToType(X::TensorDataType::FLOAT);
+            }
+            X::Tensor vecT(vecValCont);
+            totalCount = vecT->GetCount();
+            if (totalCount > 0 && dimension_ > 0 && totalCount % dimension_ == 0) {
+                data.resize(totalCount);
+                memcpy(data.data(), vecT->GetData(), totalCount * sizeof(float));
+                rawPtr = data.data();
+            }
+        } else if (vecVal.IsList()) {
+            X::List lst(vecVal);
+            totalCount = lst.Size();
+            if (totalCount > 0 && dimension_ > 0 && totalCount % dimension_ == 0) {
+                data.resize(totalCount);
+                for (long long i = 0; i < totalCount; i++) {
+                    data[i] = (float)lst[i];
+                }
+                rawPtr = data.data();
+            }
         }
 
-        X::Tensor vecT0(vecVal);
-        X::Value vecValCont = vecT0->ToType(X::TensorDataType::FLOAT);
-        X::Tensor vecT(vecValCont);
-        long long totalCount = vecT->GetCount();
-
-        if (totalCount == 0 || dimension_ <= 0 || totalCount % dimension_ != 0) {
+        if (rawPtr == nullptr || totalCount == 0 || dimension_ <= 0 || totalCount % dimension_ != 0) {
             retValue = X::Value(false);
             return;
         }
@@ -874,8 +893,6 @@ namespace Quanta
         size_t n = totalCount / dimension_;
         total_add_vectors_ += n;
         total_records_ += n;
-        
-        const float* rawPtr = reinterpret_cast<const float*>(vecT->GetData());
 
         // Build external IDs
         std::vector<unsigned long long> extIds(n);
@@ -1178,16 +1195,39 @@ namespace Quanta
         X::Value vecVal = params[0];
         int topK = params[1].ToInt();
 
-        if (!vecVal.IsTensor()) {
+        if (!vecVal.IsTensor() && !vecVal.IsList()) {
             retValue = X::Value();
             return;
         }
 
-        X::Tensor vecT0(vecVal);
-        X::Value vecValCont = vecT0->ToType(X::TensorDataType::FLOAT);
-        X::Tensor vecT(vecValCont);
-        std::vector<float> query(vecT->GetCount());
-        memcpy(query.data(), vecT->GetData(), vecT->GetCount() * sizeof(float));
+        std::vector<float> query;
+        if (vecVal.IsTensor()) {
+            X::Tensor vecT0(vecVal);
+            X::Value vecValCont = vecVal;
+            if (vecT0->GetDataType() != X::TensorDataType::FLOAT) {
+                vecValCont = vecT0->ToType(X::TensorDataType::FLOAT);
+            }
+            X::Tensor vecT(vecValCont);
+            long long totalCount = vecT->GetCount();
+            if (totalCount > 0) {
+                query.resize(totalCount);
+                memcpy(query.data(), vecT->GetData(), totalCount * sizeof(float));
+            }
+        } else if (vecVal.IsList()) {
+            X::List lst(vecVal);
+            long long totalCount = lst.Size();
+            if (totalCount > 0) {
+                query.resize(totalCount);
+                for (long long i = 0; i < totalCount; i++) {
+                    query[i] = (float)lst[i];
+                }
+            }
+        }
+
+        if (query.empty() || query.size() != dimension_) {
+            retValue = X::Value();
+            return;
+        }
 
         // Parse dedup threshold
         float dedupThreshold = -1.0f;
@@ -1956,6 +1996,16 @@ namespace Quanta
     X::Value PartitionedVdb::GetTotalRecords()
     {
         return X::Value(total_records_.load());
+    }
+
+    bool PartitionedVdb::SetTTL(long long ttlMinutes)
+    {
+        ttl_minutes_ = ttlMinutes;
+        SetConfig("ttl_minutes", std::to_string(ttl_minutes_));
+        if (m_config) {
+            m_config->SaveConfigFromMap(config_);
+        }
+        return true;
     }
 
     X::Value PartitionedVdb::PerformFullScan()
