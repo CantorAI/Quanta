@@ -61,4 +61,5 @@ for r in results:
 ```
 
 ## 📄 License
-This project is open-sourced under the MIT License.
+This project is open-sourced under the [Apache License, Version 2.0](LICENSE).
+For more details, please refer to the included `LICENSE` and `NOTICE` files.
