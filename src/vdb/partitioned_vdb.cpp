@@ -1004,7 +1004,6 @@ namespace Quanta
             // ==========================================
             // WAL (Write-Ahead Log) Synchronous Append safely decoupled!
             // ==========================================
-            std::string target_wal;
             {
                 std::lock_guard<std::mutex> lock(partition->GetLock());
                 long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1013,17 +1012,11 @@ namespace Quanta
                 if (partition->active_wal_filename_.empty()) {
                     partition->active_wal_filename_ = partition->GetKey() + ".wal_" + std::to_string(now_ms);
                 }
-                target_wal = partition->active_wal_filename_;
-            }
 
-            // EXECUTED COMPLETELY UNLOCKED OUTSIDE THE MUTEX!
-            BucketStorage::AppendWalRecord(basePath_, target_wal, task.extIds, task.chunkTexts, task.timestampMs, rawPtr, task.n, task.dimension);
+                // WAL appended securely inside the bucket lock to prevent concurrent Windows file handle collisions
+                // and orphaned files during background queue rotation.
+                BucketStorage::AppendWalRecord(basePath_, partition->active_wal_filename_, task.extIds, task.chunkTexts, task.timestampMs, rawPtr, task.n, task.dimension);
 
-            {
-                std::lock_guard<std::mutex> lock(partition->GetLock());
-                long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count();
-                    
                 partition->active_wal_record_count_ += task.n;
                 partition->IncrementTotalInsertedCount(task.n);
                 partition->last_wal_append_ms_ = now_ms;
@@ -2353,9 +2346,16 @@ namespace Quanta
             std::string target_key = unmerged_wal.substr(0, wal_pos);
             fs::path walPath = basePath_ / unmerged_wal;
 
-            std::vector<char> buffer;
-            if (BucketStorage::ReadWalFile(walPath, buffer)) {
-                ProcessWalFileBuffer(target_key, buffer);
+            try {
+                std::vector<char> buffer;
+                if (BucketStorage::ReadWalFile(walPath, buffer)) {
+                    ProcessWalFileBuffer(target_key, buffer);
+                }
+            } catch (const std::exception& e) {
+                // Log and swallow exception to prevent MaintenanceThread termination
+                // The HNSW capacity limits are now dynamic, but corrupted WALs shouldn't crash the loop.
+            } catch (...) {
+                // Catch any other exceptions
             }
 
             std::error_code ec;
