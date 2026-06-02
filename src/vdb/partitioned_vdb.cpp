@@ -54,17 +54,17 @@ namespace Quanta
             });
 
         // Mark removed items
-        std::vector<bool> removed(n, false);
+        std::vector<uint8_t> removed(n, 0);
 
         // Compare each item against higher-scored items
-#pragma omp parallel for schedule(dynamic)
-        for (long long ii = 1; ii < static_cast<long long>(n); ++ii) {
+        // (OpenMP parallelization removed to prevent Thread Explosion inside Lookup's outer parallel loop)
+        for (size_t ii = 1; ii < n; ++ii) {
             size_t i = sortedIdx[ii];
             if (removed[i] || vectors[i].empty()) continue;
 
             const auto& vec_i = vectors[i];
 
-            for (long long jj = 0; jj < ii; ++jj) {
+            for (size_t jj = 0; jj < ii; ++jj) {
                 size_t j = sortedIdx[jj];
                 if (removed[j] || vectors[j].empty()) continue;
 
@@ -72,7 +72,7 @@ namespace Quanta
                 float sim = quanta_cosine_similarity(dimension, vec_i, vec_j);
 
                 if (sim >= threshold) {
-                    removed[i] = true;
+                    removed[i] = 1;
                     break;
                 }
             }
@@ -1278,12 +1278,13 @@ namespace Quanta
 
         // Results: id, score, chunk_text, partition_key, timestamp_ms
         std::vector<std::tuple<unsigned long long, float, std::string, std::string, unsigned long long>> allResults;
+        std::mutex results_mutex;
 
-        // 1. Sequentially load partitions to prevent massive I/O disk thrashing
-        std::vector<std::pair<std::string, std::shared_ptr<VdbBucket>>> activePartitions;
-        activePartitions.reserve(matchingKeys.size());
-
-        for (const auto& key : matchingKeys) {
+        // Query each matched partition concurrently utilizing OpenMP. This ensures parallel disk I/O 
+        // for partitions not yet loaded, drastically reducing query latency across many buckets.
+#pragma omp parallel for
+        for (long long i = 0; i < static_cast<long long>(matchingKeys.size()); ++i) {
+            const auto& key = matchingKeys[i];
             std::shared_ptr<VdbBucket> pPart = nullptr;
             {
                 std::lock_guard<std::mutex> glock(partitions_mutex_);
@@ -1292,18 +1293,8 @@ namespace Quanta
             if (!pPart) {
                 pPart = LoadPartition(key);
             }
-            if (pPart) {
-                activePartitions.push_back({key, pPart});
-            }
-        }
-
-        // 2. Query each active partition concurrently utilizing OpenMP 
-        std::mutex results_mutex;
-
-#pragma omp parallel for
-        for (long long i = 0; i < static_cast<long long>(activePartitions.size()); ++i) {
-            const auto& key = activePartitions[i].first;
-            auto pPart = activePartitions[i].second;
+            
+            if (!pPart) continue;
 
             auto results = pPart->Lookup(query, topK);
 

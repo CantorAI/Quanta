@@ -10,7 +10,8 @@ namespace Quanta {
         : dimension_(dimension), spaceName_(spaceName), maxElements_(maxElements), M_(M), efConstruction_(efConstruction), efSearch_(efSearch), key_(key)
     {
         vdb_ = std::make_unique<VectorDatabase>(dimension_);
-        index_ = std::make_unique<HnswVdb>(spaceName_, dimension_, maxElements_, M_, efConstruction_, efSearch_);
+        size_t initialCapacity = (maxElements_ < 1000) ? maxElements_ : 1000;
+        index_ = std::make_unique<HnswVdb>(spaceName_, dimension_, initialCapacity, M_, efConstruction_, efSearch_);
         
         long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         last_access_ms_ = now_ms;
@@ -62,7 +63,10 @@ namespace Quanta {
         
         size_t new_total = vdb_->GetSize();
         if (new_total > index_->GetMaxElements()) {
-            index_->Resize(new_total + 1000);
+            size_t new_max = index_->GetMaxElements() * 2;
+            if (new_max < new_total) new_max = new_total + 1000;
+            if (new_max > maxElements_) new_max = maxElements_;
+            index_->Resize(new_max);
         }
         
         index_->AddVectors(internalIndices, vectorData, 1, 1);
@@ -91,7 +95,10 @@ namespace Quanta {
         
         size_t new_total = vdb_->GetSize();
         if (new_total > index_->GetMaxElements()) {
-            index_->Resize(new_total + 1000);
+            size_t new_max = index_->GetMaxElements() * 2;
+            if (new_max < new_total) new_max = new_total + 1000;
+            if (new_max > maxElements_) new_max = maxElements_;
+            index_->Resize(new_max);
         }
         
         index_->AddVectors(internalIndices, vectors.data(), vectors.size(), 1);
