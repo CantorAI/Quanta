@@ -1,5 +1,6 @@
 #include "vdb_config.h"
 #include <iostream>
+#include <climits>
 #include "xpackage.h"
 
 namespace Quanta
