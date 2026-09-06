@@ -1,51 +1,28 @@
 # Building Quanta
 
-Quanta leverages the **XLang** execution engine and its memory handling primitives. To build Quanta successfully, the `xlang` repository must be present in the same parent directory.
+Quanta uses the XLang3 public C++ SDK (`xlang3/sdk`) and links to
+`xlang3_runtime`. It exports `Load(void*, X3Value)` and registers the `quanta`
+module. No legacy XLang host or `Api/value.cpp` is needed.
 
-```text
-/your_workspace/
-├── xlang/         <-- (Required dependency)
-└── Quanta/        <-- (This repository)
+Use the existing CantorAI workspace build scripts. The root contains sibling
+`CantorAIWorkspace`, `xlang3`, `Cantor`, and `Quanta` repositories.
+
+From that root, with Visual Studio 2026 installed:
+
+```powershell
+.\CantorAIWorkspace\dev\tools\Build\build_project.ps1 -Root $PWD -BuildType Release -CantorOnly -WithQuanta -Target QuantaSdkTests
 ```
 
-## 1. Clone Dependencies
+Add `-WithGalaxy -WithVega` when retaining those components in the focused
+workspace configuration. `-Target Quanta` builds only the library and dependencies.
 
-First, ensure you have the `xlang` runtime cloned into your workspace:
+The Windows output remains `out/build/x64-Release/bin/Release/Quanta.dll`.
+Deploy it with the matching `xlang3_runtime.dll` and XLang3 SQLite package.
 
-```bash
-cd /your_workspace/
-git clone https://github.com/CantorAI/xlang.git
+```powershell
+ctest --test-dir out/build/x64-Release/components/Quanta -C Release --output-on-failure
 ```
 
-Then, clone Quanta:
-
-```bash
-git clone https://github.com/CantorAI/Quanta.git
-cd Quanta
-```
-
-## 2. Compile the Project
-
-We provide automated build scripts for Windows, Linux, and macOS. Ensure you have `CMake` (3.10+) installed on your system.
-
-### Windows
-Run the batch script from the command prompt or double-click it:
-```cmd
-build.bat
-```
-
-### Linux / macOS
-Make the shell script executable and run it:
-```bash
-chmod +x build.sh
-./build.sh
-```
-
-### Manual Build
-If you prefer to run CMake manually:
-```bash
-mkdir build
-cd build
-cmake ..
-cmake --build . --config Release
-```
+[Test details and import examples](../test/native/README.md).
+Linux/macOS validation is deferred; standalone legacy build scripts are not the
+supported entry point for this migration.

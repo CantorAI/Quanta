@@ -1,260 +1,112 @@
 #include "vdb.h"
 #include "VectorDatabase.h"
 #include "HnswVdb.h"
+#include "vector_input.h"
 
-namespace Quanta
-{
-	Vdb::Vdb(X::ARGS& params, X::KWARGS& kwParams)
-	{
-		if (params.size() == 0 && kwParams.size())
-		{
-			//need to call load and init vdb
-			return;
-		}
-		X::Value retValue;
-		Init(nullptr, nullptr, params, kwParams, retValue);
-	}
+namespace Quanta {
+X::Value Vdb::Init(const X::ARGS& args, const X::KWARGS& kwargs) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto integer = [&](const char* name, long long fallback) {
+        auto value = Keyword(kwargs, name);
+        return value ? value->ToLongLong() : fallback;
+    };
+    int dimension = static_cast<int>(integer("dimension", args.empty() ? 1024 : args[0].ToLongLong()));
+    long long capacity = integer("max_elements", 1000000);
+    int m = static_cast<int>(integer("M", 16));
+    int construction = static_cast<int>(integer("ef_construction", 200));
+    int search = static_cast<int>(integer("ef_search", 50));
+    auto metric = Keyword(kwargs, "space");
+    std::string space = metric ? metric->ToString() : "l2";
+    if (dimension <= 0 || capacity <= 0 || m < 2 || construction <= 0 || search <= 0)
+        throw X::Error("Invalid vector database dimensions or index parameters");
+    auto database = std::make_unique<VectorDatabase>(dimension);
+    database->AddParameter("dimension", dimension);
+    database->AddParameter("space", space);
+    database->AddParameter("max_elements", capacity);
+    database->AddParameter("M", m);
+    database->AddParameter("ef_construction", construction);
+    database->AddParameter("ef_search", search);
+    auto index = std::make_unique<HnswVdb>(space, dimension, static_cast<size_t>(capacity), m, construction, search);
+    delete m_index;
+    delete m_vdb;
+    m_index = index.release();
+    m_vdb = database.release();
+    return X::Value(true);
+}
 
-	bool Vdb::Init(X::XRuntime* rt, X::XObj* pContext,
-		X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
-	{
-		// 1) defaults
-		std::string spaceName = "l2";
-		int         dimension = 1024;
-		size_t      maxElements = 1000000;
-		int         M = 16;
-		int         efConstruction = 200;
-		int         efSearch = 50;
+Vdb::~Vdb() { delete m_index; delete m_vdb; }
 
-		// 2) positional override for dimension
-		if (params.size() >= 1) {
-			dimension = params[0].ToInt();
-		}
+bool Vdb::Save(const std::string& filename) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!m_vdb || !m_index) return false;
+    if (!m_vdb->Save(filename)) return false;
+    m_index->Save(filename);
+    return true;
+}
 
-		// 3) keyword overrides
-		if (auto it = kwParams.find("dimension"); it) {
-			dimension = it->val.ToInt();
-		}
-		m_vdb = new VectorDatabase(dimension);
+bool Vdb::Load(const std::string& filename) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto database = std::make_unique<VectorDatabase>(0);
+    if (!database->Load(filename)) return false;
+    auto index = std::make_unique<HnswVdb>(
+        database->GetParam("space", std::string("l2")), database->GetDimension(),
+        database->GetParam<size_t>("max_elements", 10000), database->GetParam("M", 16),
+        database->GetParam("ef_construction", 200), database->GetParam("ef_search", 50));
+    index->Load(filename);
+    delete m_index;
+    delete m_vdb;
+    m_index = index.release();
+    m_vdb = database.release();
+    return true;
+}
 
-		m_vdb->AddParameter("dimension", dimension);
+X::Value Vdb::Lookup(const X::Value& vector, int topK) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!m_index) throw X::Error("Vector database is not initialized");
+    FloatInput input(vector);
+    auto results = m_index->Lookup(input.data(), input.size(), topK);
+    auto output = X::Value::List(Host());
+    for (const auto& result : results) {
+        auto item = X::Value::List(Host());
+        auto id = m_vdb->GetIdByIndex(result.first);
+        item.Append(id);
+        item.Append(result.second);
+        item.Append(m_vdb->GetTextById(id));
+        output.Append(item);
+    }
+    return output;
+}
 
-		if (auto it = kwParams.find("space"); it) {
-			spaceName = it->val.ToString();
-			m_vdb->AddParameter("space", spaceName);
-		}
-		if (auto it = kwParams.find("max_elements"); it) {
-			maxElements = static_cast<size_t>(it->val.ToInt());
-			m_vdb->AddParameter("max_elements", maxElements);
-		}
-		if (auto it = kwParams.find("M"); it) {
-			M = it->val.ToInt();
-			m_vdb->AddParameter("M", M);
-		}
-		if (auto it = kwParams.find("ef_construction"); it) {
-			efConstruction = it->val.ToInt();
-			m_vdb->AddParameter("ef_construction", efConstruction);
-		}
-		if (auto it = kwParams.find("ef_search"); it) {
-			efSearch = it->val.ToInt();
-			m_vdb->AddParameter("ef_search", efSearch);
-		}
-
-		// 4) construct the index with all parameters
-		m_index = new HnswVdb(
-			spaceName,
-			dimension,
-			maxElements,
-			M,
-			efConstruction,
-			efSearch
-		);
-		retValue = X::Value(true);
-		return true;
-	}
-
-	Vdb::~Vdb()
-	{
-		if (m_vdb)
-		{
-			delete m_vdb;
-			m_vdb = nullptr;
-		}
-	}
-	bool Vdb::Save(const std::string& fileName)
-	{
-		if (m_vdb)
-		{
-			m_vdb->Save(fileName);
-		}
-		if (m_index)
-		{
-			m_index->Save(fileName);
-		}
-		return true;
-	}
-	bool Vdb::Load(const std::string& fileName)
-	{
-		if (m_vdb)
-		{
-			delete m_vdb;
-		}
-		m_vdb = new VectorDatabase(0);
-		m_vdb->Load(fileName);
-		if (m_index)
-		{
-			delete m_index;
-		}
-		// get parameters from vdb
-		std::string space_name = m_vdb->GetParam("space", "l2").ToString();
-		int dimension = m_vdb->GetParam("dimension", 1024).ToInt();
-		size_t max_elements = static_cast<size_t>(m_vdb->GetParam("max_elements", 10000).ToInt());
-		int M = m_vdb->GetParam("M", 16).ToInt();
-		int ef_construction = m_vdb->GetParam("ef_construction", 200).ToInt();
-		int ef_search = m_vdb->GetParam("ef_search", 50).ToInt();
-		// create the index
-		m_index = new HnswVdb(
-			space_name,
-			dimension,
-			max_elements,
-			M,
-			ef_construction,
-			ef_search
-		);
-		m_index->Load(fileName);
-		return true;
-	}
-	X::Value Vdb::Lookup(X::Value& vec, int topK)
-	{
-		if (m_vdb && vec.IsTensor())
-		{
-			X::Tensor vecT0(vec);
-			X::Value vecValCont = vecT0->ToType(X::TensorDataType::FLOAT);
-			X::Tensor vecTensor(vecValCont);
-
-			std::vector<float> vecData(vecTensor->GetCount());
-			memcpy(vecData.data(), vecTensor->GetData(), vecTensor->GetCount() * sizeof(float));
-			auto results = m_index->Lookup(vecData, topK);
-			X::List list;
-			for (const auto& result : results)
-			{
-				X::List item;
-				unsigned long long id = m_vdb->GetIdByIndex(result.first);
-				item += id;
-				item += result.second;
-				item += m_vdb->GetTextById(id);
-				list->AddItem(item);
-			}
-			return list;
-		}
-		return X::Value();
-	}
-	void Vdb::AddVectors(X::XRuntime* rt, X::XObj* pContext,
-		X::ARGS& params, X::KWARGS& kwParams,
-		X::Value& retValue)
-	{
-		// sanity checks
-		if (!m_vdb || !m_index || params.size() < 2) {
-			retValue = X::Value(false);
-			return;
-		}
-
-		// --- 1) parse keywords ---
-		int num_threads = -1;
-		if (auto it = kwParams.find("num_threads")) {
-			num_threads = it->val.ToInt();
-		}
-		X::Value chunksVal;
-		if (auto it = kwParams.find("chunks")) {
-			chunksVal = it->val;
-		}
-
-		// --- 2) get the flat float array & dims ---
-		X::Value vecVal = params[1];
-		if (!vecVal.IsTensor()) {
-			retValue = X::Value(false);
-			return;
-		}
-		X::Tensor vecT0(vecVal);
-		X::Value vecValCont = vecT0->ToType(X::TensorDataType::FLOAT);
-		X::Tensor vecT(vecValCont);
-
-		long long totalCount = vecT->GetCount();
-		int D = m_vdb->GetDimension();          // your VectorDatabase dim
-		if (totalCount ==0 || D <= 0 || totalCount % D != 0) {
-			retValue = X::Value(false);
-			return;
-		}
-		size_t n = totalCount / D;
-		const float* rawPtr = reinterpret_cast<const float*>(vecT->GetData());
-
-		// --- 3) build external IDs vector ---
-		std::vector<unsigned long long> extIds(n);
-		X::Value idsVal = params[0];
-		if (idsVal.IsList()) {
-			X::List list(idsVal);
-			if (list->Size() != n) {
-				retValue = X::Value(false);
-				return;
-			}
-			size_t i = 0;
-			for (auto it : *list) {
-				extIds[i++] = it.ToLongLong();
-			}
-		}
-		else if (idsVal.IsLong()) {
-			unsigned long long start = idsVal.ToLongLong();
-			for (size_t i = 0; i < n; ++i) {
-				extIds[i] = start + i;
-			}
-		}
-		else {
-			retValue = X::Value(false);
-			return;
-		}
-
-		// --- 4) collect chunk texts if any ---
-		std::vector<std::string> chunkTexts;
-		if (chunksVal.IsList()) {
-			X::List list(chunksVal);
-			if (list->Size() == n) {
-				for (auto it : *list)
-				{
-					if (it.IsDict())
-					{
-						X::Value text = it["chunk"];
-						chunkTexts.push_back(text.ToString());
-					}
-					else
-					{
-						chunkTexts.push_back(it.ToString());
-					}
-				}
-			}
-		}
-		else if (chunksVal.IsDict()) {
-			X::Value text = chunksVal["chunk"];
-			chunkTexts.assign(n, text.ToString());
-		}
-		else if (chunksVal.IsString()) {
-			chunkTexts.assign(n, chunksVal.ToString());
-		}
-
-		// --- 5) register in the VectorDatabase ¡ú get internal indices ---
-		std::vector<unsigned long long> recIdx;
-		if (chunkTexts.empty()) {
-			recIdx = m_vdb->AddLabels(extIds, std::vector<std::string>(n));
-		}
-		else {
-			recIdx = m_vdb->AddLabels(extIds, chunkTexts);
-		}
-
-		// --- 6) insert into HNSW with the rawPtr (no copy) ---
-		m_index->AddVectors(recIdx, rawPtr, totalCount, num_threads);
-
-		unsigned long long last = extIds[n-1];
-		retValue = X::Value(last);
-	}
-
-
+X::Value Vdb::AddVectors(const X::ARGS& args, const X::KWARGS& kwargs) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!m_index || args.size() < 2) throw X::Error("AddVectors requires IDs and vectors");
+    FloatInput input(args[1]);
+    const auto dimension = static_cast<size_t>(m_vdb->GetDimension());
+    if (!input.size() || input.size() % dimension) throw X::Error("Vector dimensions do not match the database");
+    const size_t count = input.size() / dimension;
+    if (count > m_index->GetMaxElements() - m_index->GetCurrentCount())
+        throw X::Error("Vector database capacity exceeded");
+    std::vector<unsigned long long> ids(count);
+    if (IsSequence(args[0])) {
+        if (args[0].Size() != count) throw X::Error("ID count must match vector count");
+        for (size_t i = 0; i < count; ++i) ids[i] = args[0].Get(i).ToLongLong();
+    } else if (args[0].IsInt64()) {
+        const auto start = args[0].ToLongLong();
+        if (start < 0 || count - 1 > static_cast<uint64_t>(INT64_MAX - start))
+            throw X::Error("Vector IDs exceed the supported range");
+        for (size_t i = 0; i < count; ++i) ids[i] = start + i;
+    } else throw X::Error("IDs must be an integer or a list");
+    std::vector<std::string> texts(count);
+    if (auto chunks = Keyword(kwargs, "chunks")) {
+        if (IsSequence(*chunks) && chunks->Size() != count) throw X::Error("Chunk count must match vector count");
+        for (size_t i = 0; i < count; ++i) {
+            auto text = IsSequence(*chunks) ? chunks->Get(i) : *chunks;
+            texts[i] = IsMapping(text) ? text["chunk"].ToString() : text.ToString();
+        }
+    }
+    auto threads = Keyword(kwargs, "num_threads");
+    auto indices = m_vdb->AddLabels(ids, texts);
+    m_index->AddVectors(indices, input.data(), input.size(), threads ? static_cast<int>(threads->ToLongLong()) : -1);
+    return X::Value(ids.back());
+}
 }

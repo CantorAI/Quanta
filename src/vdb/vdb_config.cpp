@@ -1,7 +1,7 @@
 #include "vdb_config.h"
 #include <iostream>
 #include <climits>
-#include "xpackage.h"
+#include "quanta_runtime.h"
 
 namespace Quanta
 {
@@ -11,43 +11,47 @@ namespace Quanta
 
     VdbConfig::~VdbConfig()
     {
-        Close();
+        try { Close(); } catch (...) {}
     }
 
-    bool VdbConfig::Init(X::Runtime& rt, const fs::path& basePath, const std::string& prefix, std::map<int, std::set<std::string>>& outCustomPartitions)
+    bool VdbConfig::Init(X3PackageHost* host, const fs::path& basePath, const std::string& prefix, std::map<int, std::set<std::string>>& outCustomPartitions)
     {
-        X::Runtime defaultRt;
-        X::Package sqlModule(rt ? rt : defaultRt, "sqlite", "xlang_sqlite");
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto sqlModule = Import(host, "xlang_sqlite3", "sqlite");
 
         if (sqlModule.IsObject())
         {
             m_sqlite = sqlModule;
-            auto UseDatabase = m_sqlite["UseDatabase"];
+            auto UseDatabase = m_sqlite["Database"];
             std::string dbFile = (basePath / (prefix + "_config.db")).string();
             
-            m_configDb = UseDatabase(dbFile);
+            m_configDb = Invoke(UseDatabase, dbFile);
             if (m_configDb.IsObject())
             {
                 auto statement = m_configDb["statement"];
                 
                 // Initialize configuration table
-                auto stat = statement("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)");
-                stat["step"]();
+                auto stat = Invoke(statement, "CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)");
+                Invoke(stat["step"]);
 
                 // Initialize custom partitions table
-                auto stat_parts = statement("CREATE TABLE IF NOT EXISTS custom_partitions (id INTEGER PRIMARY KEY, tag TEXT UNIQUE)");
-                stat_parts["step"]();
+                auto stat_parts = Invoke(statement, "CREATE TABLE IF NOT EXISTS custom_partitions (id INTEGER PRIMARY KEY, tag TEXT UNIQUE)");
+                Invoke(stat_parts["step"]);
+                auto aliases = Invoke(statement, "CREATE TABLE IF NOT EXISTS custom_partition_tags (id INTEGER NOT NULL, tag TEXT UNIQUE, PRIMARY KEY(id, tag))");
+                Invoke(aliases["step"]);
+                auto migrate = Invoke(statement, "INSERT OR IGNORE INTO custom_partition_tags SELECT id, tag FROM custom_partitions");
+                Invoke(migrate["step"]);
                 
                 // Initialize buckets manifest
-                auto stat_buckets = statement("CREATE TABLE IF NOT EXISTS partitions (key TEXT PRIMARY KEY, ts_partition TEXT, custom_index INTEGER, bucket_number INTEGER, ts_start INTEGER, ts_end INTEGER, element_count INTEGER)");
-                stat_buckets["step"]();
+                auto stat_buckets = Invoke(statement, "CREATE TABLE IF NOT EXISTS partitions (key TEXT PRIMARY KEY, ts_partition TEXT, custom_index INTEGER, bucket_number INTEGER, ts_start INTEGER, ts_end INTEGER, element_count INTEGER)");
+                Invoke(stat_buckets["step"]);
                 
                 // Read custom partitions back
                 X::Value statusROW = m_sqlite["ROW"];
-                auto stat_read_parts = statement("SELECT id, tag FROM custom_partitions");
-                while (stat_read_parts["step"]() == statusROW) {
-                    int id = stat_read_parts["get"](0).ToInt();
-                    std::string tag = stat_read_parts["get"](1).ToString();
+                auto stat_read_parts = Invoke(statement, "SELECT id, tag FROM custom_partition_tags");
+                while (Invoke(stat_read_parts["step"]) == statusROW) {
+                    int id = Invoke(stat_read_parts["get"], 0).ToLongLong();
+                    std::string tag = Invoke(stat_read_parts["get"], 1).ToString();
                     outCustomPartitions[id].insert(tag);
                 }
                 
@@ -62,10 +66,11 @@ namespace Quanta
 
     bool VdbConfig::Close()
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (m_configDb.IsObject()) {
             auto closeMethod = m_configDb["close"];
             if (closeMethod.IsValid()) {
-                closeMethod();
+                Invoke(closeMethod);
             }
             m_configDb = X::Value();
         }
@@ -75,77 +80,83 @@ namespace Quanta
 
     void VdbConfig::LoadConfigToMap(std::map<std::string, std::string>& outConfigMap)
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (!m_configDb.IsObject()) return;
         
         auto statement = m_configDb["statement"];
         X::Value statusROW = m_sqlite["ROW"];
         
-        auto stat_read = statement("SELECT key, value FROM config");
-        while (stat_read["step"]() == statusROW) {
-            std::string k = stat_read["get"](0).ToString();
-            std::string v = stat_read["get"](1).ToString();
+        auto stat_read = Invoke(statement, "SELECT key, value FROM config");
+        while (Invoke(stat_read["step"]) == statusROW) {
+            std::string k = Invoke(stat_read["get"], 0).ToString();
+            std::string v = Invoke(stat_read["get"], 1).ToString();
             outConfigMap[k] = v;
         }
     }
 
     void VdbConfig::SaveConfigFromMap(const std::map<std::string, std::string>& inConfigMap)
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (!m_configDb.IsObject()) return;
         
         auto statement = m_configDb["statement"];
         for (const auto& [k, v] : inConfigMap) {
-            auto stat_write = statement("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)");
-            stat_write["bind"](1, k);
-            stat_write["bind"](2, v);
-            stat_write["step"]();
+            auto stat_write = Invoke(statement, "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)");
+            Invoke(stat_write["bind"], 1, k);
+            Invoke(stat_write["bind"], 2, v);
+            Invoke(stat_write["step"]);
         }
     }
 
     std::string VdbConfig::GetConfig(const std::string& key, const std::string& defaultVal)
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (!m_configDb.IsObject()) return defaultVal;
         auto statement = m_configDb["statement"];
-        auto stat = statement("SELECT value FROM config WHERE key=?");
-        stat["bind"](1, key);
+        auto stat = Invoke(statement, "SELECT value FROM config WHERE key=?");
+        Invoke(stat["bind"], 1, key);
         X::Value statusROW = m_sqlite["ROW"];
-        if (stat["step"]() == statusROW) {
-            return stat["get"](0).ToString();
+        if (Invoke(stat["step"]) == statusROW) {
+            return Invoke(stat["get"], 0).ToString();
         }
         return defaultVal;
     }
 
     void VdbConfig::SetConfig(const std::string& key, const std::string& value)
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (!m_configDb.IsObject()) return;
         auto statement = m_configDb["statement"];
-        auto stat = statement("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)");
-        stat["bind"](1, key);
-        stat["bind"](2, value);
-        stat["step"]();
+        auto stat = Invoke(statement, "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)");
+        Invoke(stat["bind"], 1, key);
+        Invoke(stat["bind"], 2, value);
+        Invoke(stat["step"]);
     }
 
     void VdbConfig::SaveCustomPartitionToDB(int index, const std::string& tag)
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (!m_configDb.IsObject()) return;
         auto statement = m_configDb["statement"];
-        auto stat = statement("INSERT OR IGNORE INTO custom_partitions (id, tag) VALUES (?, ?)");
-        stat["bind"](1, index);
-        stat["bind"](2, tag);
-        stat["step"]();
+        auto stat = Invoke(statement, "INSERT OR IGNORE INTO custom_partition_tags (id, tag) VALUES (?, ?)");
+        Invoke(stat["bind"], 1, index);
+        Invoke(stat["bind"], 2, tag);
+        Invoke(stat["step"]);
     }
 
     void VdbConfig::LoadHighestBucketsMap(std::map<std::string, int>& outBucketsMap)
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (!m_configDb.IsObject()) return;
         
         auto statement = m_configDb["statement"];
         X::Value statusROW = m_sqlite["ROW"];
-        auto stat = statement("SELECT ts_partition, custom_index, MAX(bucket_number) FROM partitions GROUP BY ts_partition, custom_index");
+        auto stat = Invoke(statement, "SELECT ts_partition, custom_index, MAX(bucket_number) FROM partitions GROUP BY ts_partition, custom_index");
         
-        while (stat["step"]() == statusROW) {
-            std::string tsPartition = stat["get"](0).ToString();
-            int customIndex = stat["get"](1).ToInt();
-            int maxBucket = stat["get"](2).ToInt();
+        while (Invoke(stat["step"]) == statusROW) {
+            std::string tsPartition = Invoke(stat["get"], 0).ToString();
+            int customIndex = Invoke(stat["get"], 1).ToLongLong();
+            int maxBucket = Invoke(stat["get"], 2).ToLongLong();
             
             std::string mapKey = tsPartition + "_" + std::to_string(customIndex);
             outBucketsMap[mapKey] = maxBucket;
@@ -154,16 +165,17 @@ namespace Quanta
 
     bool VdbConfig::LoadBucketBounds(const std::string& key, long long& outStart, long long& outEnd)
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (!m_configDb.IsObject()) return false;
         
         auto statement = m_configDb["statement"];
         X::Value statusROW = m_sqlite["ROW"];
-        X::Value stat = statement("SELECT ts_start, ts_end FROM partitions WHERE key=?");
-        stat["bind"](1, key);
+        X::Value stat = Invoke(statement, "SELECT ts_start, ts_end FROM partitions WHERE key=?");
+        Invoke(stat["bind"], 1, key);
         
-        if (stat["step"]() == statusROW) {
-            outStart = stat["get"](0).ToLongLong();
-            outEnd = stat["get"](1).ToLongLong();
+        if (Invoke(stat["step"]) == statusROW) {
+            outStart = Invoke(stat["get"], 0).ToLongLong();
+            outEnd = Invoke(stat["get"], 1).ToLongLong();
             return true;
         }
         return false;
@@ -171,66 +183,72 @@ namespace Quanta
 
     bool VdbConfig::SaveBucketBounds(const std::string& key, const std::string& tsPartition, int customIndex, int bucketNum, long long tsStart, long long tsEnd)
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (!m_configDb.IsObject()) return false;
         
         auto statement = m_configDb["statement"];
-        X::Value stat = statement("INSERT OR REPLACE INTO partitions (key, ts_partition, custom_index, bucket_number, ts_start, ts_end) VALUES (?, ?, ?, ?, ?, ?)");
-        stat["bind"](1, key);
-        stat["bind"](2, tsPartition);
-        stat["bind"](3, customIndex);
-        stat["bind"](4, bucketNum);
-        stat["bind"](5, tsStart);
-        stat["bind"](6, tsEnd);
-        stat["step"]();
+        X::Value stat = Invoke(statement, "INSERT OR REPLACE INTO partitions (key, ts_partition, custom_index, bucket_number, ts_start, ts_end) VALUES (?, ?, ?, ?, ?, ?)");
+        Invoke(stat["bind"], 1, key);
+        Invoke(stat["bind"], 2, tsPartition);
+        Invoke(stat["bind"], 3, customIndex);
+        Invoke(stat["bind"], 4, bucketNum);
+        Invoke(stat["bind"], 5, tsStart);
+        Invoke(stat["bind"], 6, tsEnd);
+        Invoke(stat["step"]);
         
         return true;
     }
 
     void VdbConfig::UpdateTotalRecordsCount(long long totalRecords)
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         UpdateMetricValue("TotalRecords", totalRecords);
     }
 
     long long VdbConfig::GetTotalRecordsCount()
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         return GetMetricValue("TotalRecords");
     }
 
     long long VdbConfig::GetTotalBucketsCount()
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (!m_configDb.IsObject()) return 0;
         
         auto statement = m_configDb["statement"];
         X::Value statusROW = m_sqlite["ROW"];
-        auto stat = statement("SELECT COUNT(*) FROM partitions");
+        auto stat = Invoke(statement, "SELECT COUNT(*) FROM partitions");
         
-        if (stat["step"]() == statusROW) {
-            return stat["get"](0).ToLongLong();
+        if (Invoke(stat["step"]) == statusROW) {
+            return Invoke(stat["get"], 0).ToLongLong();
         }
         return 0;
     }
 
     void VdbConfig::UpdateMetricValue(const std::string& key, long long value)
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (!m_configDb.IsObject()) return;
         auto statement = m_configDb["statement"];
-        auto stat = statement("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)");
-        stat["bind"](1, key);
-        stat["bind"](2, std::to_string(value));
-        stat["step"]();
+        auto stat = Invoke(statement, "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)");
+        Invoke(stat["bind"], 1, key);
+        Invoke(stat["bind"], 2, std::to_string(value));
+        Invoke(stat["step"]);
     }
 
     long long VdbConfig::GetMetricValue(const std::string& key)
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (!m_configDb.IsObject()) return 0;
         
         auto statement = m_configDb["statement"];
         X::Value statusROW = m_sqlite["ROW"];
-        auto stat = statement("SELECT value FROM config WHERE key = ?");
-        stat["bind"](1, key);
+        auto stat = Invoke(statement, "SELECT value FROM config WHERE key = ?");
+        Invoke(stat["bind"], 1, key);
         
-        if (stat["step"]() == statusROW) {
-            std::string valStr = stat["get"](0).ToString();
+        if (Invoke(stat["step"]) == statusROW) {
+            std::string valStr = Invoke(stat["get"], 0).ToString();
             try {
                 return std::stoll(valStr);
             } catch (...) {
@@ -242,6 +260,7 @@ namespace Quanta
 
     std::vector<std::string> VdbConfig::ScanMatchingBuckets(long long tsStartMs, long long tsEndMs, const std::set<int>& customIndices)
     {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         std::vector<std::string> result;
         if (!m_configDb.IsObject()) return result;
         
@@ -252,14 +271,14 @@ namespace Quanta
         X::Value statusROW = m_sqlite["ROW"];
         
         std::string q = "SELECT key, ts_start, ts_end, custom_index, ts_partition FROM partitions";
-        X::Value stat = statement(q);
+        X::Value stat = Invoke(statement, q);
         
-        while (stat["step"]() == statusROW) {
-            std::string key = stat["get"](0).ToString();
-            long long bStart = stat["get"](1).ToLongLong();
-            long long bEnd = stat["get"](2).ToLongLong();
-            int cIndex = stat["get"](3).ToInt();
-            std::string tsPart = stat["get"](4).ToString();
+        while (Invoke(stat["step"]) == statusROW) {
+            std::string key = Invoke(stat["get"], 0).ToString();
+            long long bStart = Invoke(stat["get"], 1).ToLongLong();
+            long long bEnd = Invoke(stat["get"], 2).ToLongLong();
+            int cIndex = Invoke(stat["get"], 3).ToLongLong();
+            std::string tsPart = Invoke(stat["get"], 4).ToString();
 
             if (!customIndices.empty() && customIndices.find(cIndex) == customIndices.end()) continue;
             

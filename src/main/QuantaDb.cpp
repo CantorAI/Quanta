@@ -1,5 +1,5 @@
 #include "QuantaDb.h"
-#include "xpackage.h"
+#include "quanta_runtime.h"
 #include "port.h"
 #include "QuantaHost.h"
 #include "help_func.h"
@@ -11,12 +11,11 @@ namespace Quanta
         std::string dbFolder = exePath + Path_Sep_S + "QuantaDB";
         if (isDir(dbFolder.c_str()) == false)
         {
-            _mkdir(dbFolder.c_str());
+            std::filesystem::create_directories(dbFolder);
         }
         std::string dbName = dbFolder + Path_Sep_S + "quantastore.db";
-        X::Runtime rt;
-        X::Package sqlite(rt, "sqlite", "xlang_sqlite");
-        m_db = sqlite["Database"](dbName);
+        auto sqlite = Import(Host(), "xlang_sqlite3", "sqlite");
+        m_db = Invoke(sqlite["Database"], dbName);
         m_statment = m_db["statement"];
         m_sqlite = sqlite;
         m_status_ROW = m_sqlite["ROW"];
@@ -25,17 +24,20 @@ namespace Quanta
 
     void QuantaDb::Close()
     {
-        // Close database connection if needed
+        m_statment = X::Value();
+        if (m_db.IsObject()) Invoke(m_db["close"]);
+        m_db = X::Value();
+        m_sqlite = X::Value();
     }
 
     bool QuantaDb::CheckTableExist(std::string tableName)
     {
         bool bHave = false;
-        X::Value stat = m_statment("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?");
-        stat["bind"](1, tableName);
-        if (stat["step"]() == m_status_ROW)
+        X::Value stat = Invoke(m_statment, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?");
+        Invoke(stat["bind"], 1, tableName);
+        if (Invoke(stat["step"]) == m_status_ROW)
         {
-            int cnt = stat["get"](0);
+            int cnt = static_cast<int>(Invoke(stat["get"], 0).ToLongLong());
             bHave = (cnt > 0);
         }
         return bHave;
@@ -48,7 +50,7 @@ namespace Quanta
         // DfsFiles table for file system scanning
         if (!CheckTableExist("DfsFiles"))
         {
-            ExecSQL("CREATE TABLE \"DfsFiles\" (\
+            Invoke(ExecSQL, "CREATE TABLE \"DfsFiles\" (\
                 \"FilePath\" TEXT,\
                 \"NodeId\" TEXT,\
                 \"FileSize\" INTEGER,\
@@ -63,7 +65,7 @@ namespace Quanta
         // Scan history table
         if (!CheckTableExist("ScanHistory"))
         {
-            ExecSQL("CREATE TABLE \"ScanHistory\" (\
+            Invoke(ExecSQL, "CREATE TABLE \"ScanHistory\" (\
                 \"NodeId\" TEXT,\
                 \"StartTime\" INTEGER,\
                 \"EndTime\" INTEGER,\
@@ -77,41 +79,41 @@ namespace Quanta
 
     bool QuantaDb::AddFile(std::string filePath, long long fileSize, std::string nodeId, std::string metadata)
     {
-        X::Value stat = m_statment("INSERT OR REPLACE INTO DfsFiles (FilePath, NodeId, FileSize, ModifiedTime, CreatedTime, Metadata, LastScannedTime) VALUES (?, ?, ?, ?, ?, ?, ?)");
-        stat["bind"](1, filePath);
-        stat["bind"](2, nodeId);
-        stat["bind"](3, fileSize);
+        X::Value stat = Invoke(m_statment, "INSERT OR REPLACE INTO DfsFiles (FilePath, NodeId, FileSize, ModifiedTime, CreatedTime, Metadata, LastScannedTime) VALUES (?, ?, ?, ?, ?, ?, ?)");
+        Invoke(stat["bind"], 1, filePath);
+        Invoke(stat["bind"], 2, nodeId);
+        Invoke(stat["bind"], 3, fileSize);
 
         // Get current time for modification and creation if not provided
         long long currentTime = getCurMilliTimeStamp();
 
-        stat["bind"](4, currentTime);  // ModifiedTime - would be better to get from file system
-        stat["bind"](5, currentTime);  // CreatedTime - would be better to get from file system
-        stat["bind"](6, metadata);
-        stat["bind"](7, currentTime);  // LastScannedTime
+        Invoke(stat["bind"], 4, currentTime);  // ModifiedTime - would be better to get from file system
+        Invoke(stat["bind"], 5, currentTime);  // CreatedTime - would be better to get from file system
+        Invoke(stat["bind"], 6, metadata);
+        Invoke(stat["bind"], 7, currentTime);  // LastScannedTime
 
-        bool result = stat["step"]() != m_status_ROW;
+        bool result = Invoke(stat["step"]) != m_status_ROW;
         return result;
     }
 
     X::Value QuantaDb::QueryFilesByNodeId(std::string nodeId)
     {
         X::Value results;
-        X::Value stat = m_statment("SELECT FilePath, FileSize, ModifiedTime, CreatedTime, Metadata, LastScannedTime FROM DfsFiles WHERE NodeId = ? ORDER BY FilePath");
-        stat["bind"](1, nodeId);
+        X::Value stat = Invoke(m_statment, "SELECT FilePath, FileSize, ModifiedTime, CreatedTime, Metadata, LastScannedTime FROM DfsFiles WHERE NodeId = ? ORDER BY FilePath");
+        Invoke(stat["bind"], 1, nodeId);
 
-        X::List fileList;
-        while (stat["step"]() == m_status_ROW)
+        auto fileList = X::Value::List(Host());
+        while (Invoke(stat["step"]) == m_status_ROW)
         {
-            X::Dict fileInfo;
-            fileInfo->Set("FilePath", stat["get"](0));
-            fileInfo->Set("FileSize", stat["get"](1));
-            fileInfo->Set("ModifiedTime", stat["get"](2));
-            fileInfo->Set("CreatedTime", stat["get"](3));
-            fileInfo->Set("Metadata", stat["get"](4));
-            fileInfo->Set("LastScannedTime", stat["get"](5));
+            auto fileInfo = X::Value::Dict(Host());
+            fileInfo.SetItem("FilePath", Invoke(stat["get"], 0));
+            fileInfo.SetItem("FileSize", Invoke(stat["get"], 1));
+            fileInfo.SetItem("ModifiedTime", Invoke(stat["get"], 2));
+            fileInfo.SetItem("CreatedTime", Invoke(stat["get"], 3));
+            fileInfo.SetItem("Metadata", Invoke(stat["get"], 4));
+            fileInfo.SetItem("LastScannedTime", Invoke(stat["get"], 5));
 
-            fileList->AddItem(fileInfo);
+            fileList.Append(fileInfo);
         }
 
         results = fileList;
@@ -121,12 +123,12 @@ namespace Quanta
     void QuantaDb::EnumFiles(std::function<void(std::string& filePath)> cb)
     {
         X::Value results;
-        X::Value stat = m_statment("SELECT FilePath FROM DfsFiles");
+        X::Value stat = Invoke(m_statment, "SELECT FilePath FROM DfsFiles");
 
-        X::List fileList;
-        while (stat["step"]() == m_status_ROW)
+        auto fileList = X::Value::List(Host());
+        while (Invoke(stat["step"]) == m_status_ROW)
         {
-			std::string filePath = stat["get"](0).ToString();
+			std::string filePath = Invoke(stat["get"], 0).ToString();
 			cb(filePath);
         }
     }
@@ -134,22 +136,22 @@ namespace Quanta
     X::Value QuantaDb::QueryFilesByPath(std::string pathPattern)
     {
         X::Value results;
-        X::Value stat = m_statment("SELECT FilePath, NodeId, FileSize, ModifiedTime, CreatedTime, Metadata, LastScannedTime FROM DfsFiles WHERE FilePath LIKE ? ORDER BY NodeId, FilePath");
-        stat["bind"](1, "%" + pathPattern + "%");
+        X::Value stat = Invoke(m_statment, "SELECT FilePath, NodeId, FileSize, ModifiedTime, CreatedTime, Metadata, LastScannedTime FROM DfsFiles WHERE FilePath LIKE ? ORDER BY NodeId, FilePath");
+        Invoke(stat["bind"], 1, "%" + pathPattern + "%");
 
-        X::List fileList;
-        while (stat["step"]() == m_status_ROW)
+        auto fileList = X::Value::List(Host());
+        while (Invoke(stat["step"]) == m_status_ROW)
         {
-            X::Dict fileInfo;
-            fileInfo->Set("FilePath", stat["get"](0));
-            fileInfo->Set("NodeId", stat["get"](1));
-            fileInfo->Set("FileSize", stat["get"](2));
-            fileInfo->Set("ModifiedTime", stat["get"](3));
-            fileInfo->Set("CreatedTime", stat["get"](4));
-            fileInfo->Set("Metadata", stat["get"](5));
-            fileInfo->Set("LastScannedTime", stat["get"](6));
+            auto fileInfo = X::Value::Dict(Host());
+            fileInfo.SetItem("FilePath", Invoke(stat["get"], 0));
+            fileInfo.SetItem("NodeId", Invoke(stat["get"], 1));
+            fileInfo.SetItem("FileSize", Invoke(stat["get"], 2));
+            fileInfo.SetItem("ModifiedTime", Invoke(stat["get"], 3));
+            fileInfo.SetItem("CreatedTime", Invoke(stat["get"], 4));
+            fileInfo.SetItem("Metadata", Invoke(stat["get"], 5));
+            fileInfo.SetItem("LastScannedTime", Invoke(stat["get"], 6));
 
-            fileList->AddItem(fileInfo);
+            fileList.Append(fileInfo);
         }
 
         results = fileList;
@@ -158,23 +160,23 @@ namespace Quanta
 
     bool QuantaDb::RemoveFile(std::string filePath, std::string nodeId)
     {
-        X::Value stat = m_statment("DELETE FROM DfsFiles WHERE FilePath = ? AND NodeId = ?");
-        stat["bind"](1, filePath);
-        stat["bind"](2, nodeId);
+        X::Value stat = Invoke(m_statment, "DELETE FROM DfsFiles WHERE FilePath = ? AND NodeId = ?");
+        Invoke(stat["bind"], 1, filePath);
+        Invoke(stat["bind"], 2, nodeId);
 
-        bool result = stat["step"]() != m_status_ROW;
+        bool result = Invoke(stat["step"]) != m_status_ROW;
         return result;
     }
 
     bool QuantaDb::UpdateFileMetadata(std::string filePath, std::string nodeId, std::string metadata)
     {
-        X::Value stat = m_statment("UPDATE DfsFiles SET Metadata = ?, LastScannedTime = ? WHERE FilePath = ? AND NodeId = ?");
-        stat["bind"](1, metadata);
-        stat["bind"](2, getCurMilliTimeStamp());
-        stat["bind"](3, filePath);
-        stat["bind"](4, nodeId);
+        X::Value stat = Invoke(m_statment, "UPDATE DfsFiles SET Metadata = ?, LastScannedTime = ? WHERE FilePath = ? AND NodeId = ?");
+        Invoke(stat["bind"], 1, metadata);
+        Invoke(stat["bind"], 2, getCurMilliTimeStamp());
+        Invoke(stat["bind"], 3, filePath);
+        Invoke(stat["bind"], 4, nodeId);
 
-        bool result = stat["step"]() != m_status_ROW;
+        bool result = Invoke(stat["step"]) != m_status_ROW;
         return result;
     }
 }

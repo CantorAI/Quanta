@@ -1,5 +1,5 @@
 #pragma once
-#include "xpackage.h"
+#include "quanta_runtime.h"
 
 namespace Quanta
 {
@@ -9,6 +9,7 @@ namespace Quanta
 	{
 		VectorDatabase* m_vdb = nullptr;
 		HnswVdb* m_index = nullptr;
+		std::mutex mutex_;
 	public:
 		BEGIN_PACKAGE(Vdb)
 			APISET().AddVarFunc("Init", &Vdb::Init);
@@ -19,14 +20,12 @@ namespace Quanta
 		END_PACKAGE
 
 	public:
-		Vdb(X::ARGS& params, X::KWARGS& kwParams);
-		bool Init(X::XRuntime* rt, X::XObj* pContext,
-			X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
+		Vdb() = default;
+		X::Value Init(const X::ARGS& params, const X::KWARGS& kwParams);
 		virtual ~Vdb();
 		bool Save(const std::string& fileName);
 		bool Load(const std::string& fileName);
-		X::Value Lookup(X::Value& vec, int topK);
-		void AddVectors(X::XRuntime* rt, X::XObj* pContext,
-			X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
+		X::Value Lookup(const X::Value& vec, int topK);
+		X::Value AddVectors(const X::ARGS& params, const X::KWARGS& kwParams);
 	};
 }

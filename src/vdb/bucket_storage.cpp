@@ -15,7 +15,7 @@ namespace Quanta
         return basePath / (prefix + "_" + tsPartition + "_" + std::to_string(customIndex) + "_" + bucketStr + ".vdb");
     }
 
-    bool BucketStorage::AppendWalRecord(const fs::path& basePath, const std::string& active_wal_filename, const std::vector<unsigned long long>& extIds, const std::vector<std::string>& chunkTexts, long long timestampMs, const float* vectors, size_t count, int dimension)
+    bool BucketStorage::AppendWalRecord(const fs::path& basePath, const std::string& active_wal_filename, const std::vector<unsigned long long>& extIds, const std::vector<std::string>& chunkTexts, long long timestampMs, const float* vectors, size_t count, int dimension, size_t first)
     {
         fs::path walPath = basePath / active_wal_filename;
         std::ofstream walFile(walPath, std::ios::binary | std::ios::app);
@@ -23,19 +23,19 @@ namespace Quanta
 
         for (size_t i = 0; i < count; ++i) {
             WalRecordHeader header;
-            header.external_id = extIds[i];
+            header.external_id = extIds[first + i];
             header.timestamp_ms = static_cast<unsigned long long>(timestampMs);
-            header.chunk_text_length = static_cast<unsigned int>(chunkTexts[i].size());
+            header.chunk_text_length = static_cast<unsigned int>(chunkTexts[first + i].size());
 
             walFile.write(reinterpret_cast<const char*>(&header), sizeof(WalRecordHeader));
             walFile.write(reinterpret_cast<const char*>(vectors + (i * dimension)), dimension * sizeof(float));
             
             if (header.chunk_text_length > 0) {
-                walFile.write(chunkTexts[i].data(), header.chunk_text_length);
+                walFile.write(chunkTexts[first + i].data(), header.chunk_text_length);
             }
         }
         
-        // Hard flush to disk bypassing OS buffers to survive application/kernel panics
+        // Flush the C++ stream. This is not an OS fsync/power-loss guarantee.
         walFile.flush(); 
         if (!walFile.good()) return false;
 

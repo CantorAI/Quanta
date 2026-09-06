@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Locker.h"
-#include "value.h"
+#include <iostream>
 #include <sstream> 
 #include <string>
 
@@ -10,15 +10,10 @@ namespace Quanta
 	class Log
 	{
 		Locker m_lock;
-		X::Value m_realLogger;
 	public:
 		Log();
 		~Log();
 
-		void Init(X::Value& logger)
-		{
-			m_realLogger = logger;
-		}
 		template<typename T>
 		inline Log& operator<<(const T& v)
 		{
@@ -27,7 +22,7 @@ namespace Quanta
 				std::ostringstream oss;
 				oss << v;
 				std::string message = oss.str();
-				m_realLogger(message);
+				std::clog << message;
 			}
 			return (Log&)*this;
 		}
@@ -35,7 +30,7 @@ namespace Quanta
 		{
 			if (m_level <= m_dumpLevel)
 			{
-				m_realLogger('\n');
+				std::clog << '\n';
 			}
 			l->Unlock();
 		}
@@ -68,8 +63,6 @@ namespace Quanta
 		int m_dumpLevel = 999999; //All level will dump out
 	};
 	extern Log log;
-	#define InitLog(logger) Quanta::log.Init(logger)
-	#define SetLogSizeLimit(l) Quanta::log.SetFileSizeLimit(l)
 	#define SetLogLevel(l) Quanta::log.SetDumpLevel(l)
 	#define LOGV(level) Quanta::log.SetCurInfo(__FILE__,__LINE__,level)
 	#define LOG LOGV(0)

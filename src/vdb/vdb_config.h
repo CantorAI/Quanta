@@ -7,7 +7,7 @@
 #include <tuple>
 #include <filesystem>
 #include <mutex>
-#include "xpackage.h"
+#include "quanta_runtime.h"
 
 namespace Quanta
 {
@@ -19,7 +19,7 @@ namespace Quanta
         ~VdbConfig();
 
         // One-time SQLite init
-        bool Init(X::Runtime& rt, const fs::path& basePath, const std::string& prefix, std::map<int, std::set<std::string>>& outCustomPartitions);
+        bool Init(X3PackageHost* host, const fs::path& basePath, const std::string& prefix, std::map<int, std::set<std::string>>& outCustomPartitions);
         bool Close();
 
         // Config Key/Value Settings
@@ -49,6 +49,7 @@ namespace Quanta
         std::vector<std::string> ScanMatchingBuckets(long long tsStartMs, long long tsEndMs, const std::set<int>& customIndices);
 
     private:
+        std::recursive_mutex mutex_;
         X::Value m_sqlite;
         X::Value m_configDb;
     };

@@ -125,13 +125,18 @@ namespace Quanta {
         std::vector<std::pair<unsigned long long, float>>
             Lookup(const std::vector<float>& query, int topK)
         {
-            if ((int)query.size() != dim_) {
+            return Lookup(query.data(), query.size(), topK);
+        }
+        std::vector<std::pair<unsigned long long, float>>
+            Lookup(const float* query, size_t count, int topK)
+        {
+            if (count != static_cast<size_t>(dim_) || topK <= 0) {
                 throw std::runtime_error("Lookup: query size mismatch.");
             }
 
             // optionally normalize query
             std::vector<float> qbuf;
-            const float* qptr = query.data();
+            const float* qptr = query;
             if (normalize_) {
                 qbuf.resize(dim_);
                 normalize_vector(qptr, qbuf.data());
@@ -278,13 +283,13 @@ namespace Quanta {
             return (pos == std::string::npos ? f : f.substr(0, pos));
         }
 
-        static void normalize_vector(const float* data, float* out) {
+        void normalize_vector(const float* data, float* out) const {
             float norm = 0.0f;
-            for (int i = 0; i < (int)std::distance(data, data + 1); ++i) {
+            for (int i = 0; i < dim_; ++i) {
                 norm += data[i] * data[i];
             }
             norm = 1.0f / (std::sqrt(norm) + 1e-30f);
-            for (int i = 0; i < (int)std::distance(data, data + 1); ++i) {
+            for (int i = 0; i < dim_; ++i) {
                 out[i] = data[i] * norm;
             }
         }

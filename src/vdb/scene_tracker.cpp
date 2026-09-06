@@ -1,5 +1,6 @@
 #include "scene_tracker.h"
 #include "partitioned_vdb.h"
+#include "vector_input.h"
 #include <algorithm>
 #include <mutex>
 #include <fstream>
@@ -12,31 +13,31 @@ namespace Quanta
     // ============================================================================
     // Constructor (parent-aware, called by AddVarClass)
     // ============================================================================
-    SceneTracker::SceneTracker(PartitionedVdb* parent,
-        X::ARGS& params, X::KWARGS& kwParams)
-        : vdb_(parent)
+    SceneTracker::SceneTracker(X::Value parent,
+        const X::ARGS& params, const X::KWARGS& kwParams)
+        : vdb_(parent.NativeData<PartitionedVdb>()), owner_(std::move(parent))
     {
         if (vdb_)
         {
             dimension_ = vdb_->GetDimension();
         }
 
-        if (auto it = kwParams.find("threshold"); it)
+        if (auto it = Keyword(kwParams, "threshold"); it)
         {
-            threshold_ = static_cast<float>(it->val.ToDouble());
+            threshold_ = static_cast<float>((*it).ToDouble());
         }
-        if (auto it = kwParams.find("method"); it)
+        if (auto it = Keyword(kwParams, "method"); it)
         {
-            method_ = it->val.ToString();
+            method_ = (*it).ToString();
         }
-        if (auto it = kwParams.find("window_size"); it)
+        if (auto it = Keyword(kwParams, "window_size"); it)
         {
-            window_size_ = static_cast<int>(it->val.ToLongLong());
+            window_size_ = static_cast<int>((*it).ToLongLong());
             if (window_size_ < 1) window_size_ = 1; // Safeguard
         }
-        if (auto it = kwParams.find("tracker_id"); it)
+        if (auto it = Keyword(kwParams, "tracker_id"); it)
         {
-            tracker_id_ = it->val.ToString();
+            tracker_id_ = (*it).ToString();
             LoadState(); // Instantly hydrate RAM state from disk if it exists
         }
     }
@@ -157,14 +158,14 @@ namespace Quanta
     // ============================================================================
     // Append
     // ============================================================================
-    void SceneTracker::Append(X::XRuntime* rt, X::XObj* pContext,
-        X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
+    X::Value SceneTracker::Append(const X::ARGS& params, const X::KWARGS& kwParams)
     {
+        X::Value retValue;
         std::lock_guard<std::mutex> lock(tracker_mutex_);
         if (!vdb_ || params.size() < 1)
         {
             retValue = X::Value(false);
-            return;
+            return retValue;
         }
 
         unsigned long long imageId =
@@ -176,38 +177,22 @@ namespace Quanta
         float score = 0.0f;
         std::vector<float> vec;
 
-        if (auto it = kwParams.find("timestamp"); it)
+        if (auto it = Keyword(kwParams, "timestamp"); it)
         {
-            timestampMs = it->val.ToLongLong();
+            timestampMs = (*it).ToLongLong();
         }
-        if (auto it = kwParams.find("partitionTag"); it)
+        if (auto it = Keyword(kwParams, "partitionTag"); it)
         {
-            partitionTag = it->val.ToString();
+            partitionTag = (*it).ToString();
         }
-        if (auto it = kwParams.find("score"); it)
+        if (auto it = Keyword(kwParams, "score"); it)
         {
-            score = static_cast<float>(it->val.ToDouble());
+            score = static_cast<float>((*it).ToDouble());
         }
 
         // Step 1: WAL Bypass Direct Injection vs Synchronous DB Lookup
-        if (auto it = kwParams.find("embedding"); it) {
-            // Priority: Directly extract explicitly injected tensor 
-            X::Value emb = it->val;
-            if (emb.IsTensor()) {
-                X::Tensor tensor(emb);
-                X::Value vecValFloat = tensor->ToType(X::TensorDataType::FLOAT);
-                X::Tensor tensorFloat(vecValFloat);
-                long long arySize = tensorFloat->GetDimSize(0);
-                float* t = (float*)tensorFloat->GetData();
-                vec.assign(t, t + arySize);
-            } else if (emb.IsList()) {
-                X::List list(emb);
-                size_t sz = list.Size();
-                vec.resize(sz);
-                for(size_t i = 0; i < sz; i++) {
-                    vec[i] = (float)list[i];
-                }
-            }
+        if (auto it = Keyword(kwParams, "embedding"); it) {
+            vec = FloatInput(*it).Take();
         } 
         
         // Fallback: If not dynamically injected, run the synchronous hard-disk lookup
@@ -220,7 +205,7 @@ namespace Quanta
             if (vec.empty())
             {
                 retValue = X::Value(false);
-                return;
+                return retValue;
             }
         }
 
@@ -229,6 +214,7 @@ namespace Quanta
             dimension_ = static_cast<int>(vec.size());
         }
 
+        if (vec.size() != static_cast<size_t>(dimension_)) throw X::Error("Tracker embedding dimension mismatch");
         NormalizeVec(vec);
 
         // Step 2: First frame — initialize
@@ -247,7 +233,7 @@ namespace Quanta
             }
 
             retValue = BuildResult(false, 1.0f);
-            return;
+            return retValue;
         }
 
         // Step 3: Cosine similarity 
@@ -303,7 +289,7 @@ namespace Quanta
             if (state_.frame_count % 150 == 0) SaveState();
 
             retValue = BuildResult(false, similarity);
-            return;
+            return retValue;
         }
 
         // Step 5: New scene
@@ -326,6 +312,7 @@ namespace Quanta
         SaveState();
 
         retValue = BuildResult(true, similarity, &completed);
+        return retValue;
     }
 
     // ============================================================================
@@ -345,16 +332,16 @@ namespace Quanta
     X::Value SceneTracker::GetState()
     {
         std::lock_guard<std::mutex> lock(tracker_mutex_);
-        X::Dict dict;
-        dict->Set("scene_id", state_.scene_id);
-        dict->Set("frame_count", state_.frame_count);
-        dict->Set("start_ts", state_.start_ts);
-        dict->Set("end_ts", state_.end_ts);
-        dict->Set("best_image_id",
+        auto dict = X::Value::Dict(Host());
+        dict.SetItem("scene_id", state_.scene_id);
+        dict.SetItem("frame_count", state_.frame_count);
+        dict.SetItem("start_ts", state_.start_ts);
+        dict.SetItem("end_ts", state_.end_ts);
+        dict.SetItem("best_image_id",
             static_cast<long long>(state_.best_image_id));
-        dict->Set("best_score",
+        dict.SetItem("best_score",
             static_cast<double>(state_.best_score));
-        dict->Set("method", method_);
+        dict.SetItem("method", method_);
         return dict;
     }
 
@@ -364,30 +351,30 @@ namespace Quanta
     X::Value SceneTracker::BuildResult(bool isNewScene, float similarity,
         const SceneState* completedScene)
     {
-        X::Dict result;
-        result->Set("scene_id", state_.scene_id);
-        result->Set("is_new_scene", isNewScene);
-        result->Set("similarity", static_cast<double>(similarity));
-        result->Set("scene_frame_count", state_.frame_count);
-        result->Set("scene_start_ts", state_.start_ts);
-        result->Set("scene_end_ts", state_.end_ts);
-        result->Set("best_image_id",
+        auto result = X::Value::Dict(Host());
+        result.SetItem("scene_id", state_.scene_id);
+        result.SetItem("is_new_scene", isNewScene);
+        result.SetItem("similarity", static_cast<double>(similarity));
+        result.SetItem("scene_frame_count", state_.frame_count);
+        result.SetItem("scene_start_ts", state_.start_ts);
+        result.SetItem("scene_end_ts", state_.end_ts);
+        result.SetItem("best_image_id",
             static_cast<long long>(state_.best_image_id));
-        result->Set("best_score",
+        result.SetItem("best_score",
             static_cast<double>(state_.best_score));
 
         if (completedScene)
         {
-            X::Dict completed;
-            completed->Set("scene_id", completedScene->scene_id);
-            completed->Set("best_image_id",
+            auto completed = X::Value::Dict(Host());
+            completed.SetItem("scene_id", completedScene->scene_id);
+            completed.SetItem("best_image_id",
                 static_cast<long long>(completedScene->best_image_id));
-            completed->Set("best_score",
+            completed.SetItem("best_score",
                 static_cast<double>(completedScene->best_score));
-            completed->Set("frame_count", completedScene->frame_count);
-            completed->Set("start_ts", completedScene->start_ts);
-            completed->Set("end_ts", completedScene->end_ts);
-            result->Set("completed_scene", completed);
+            completed.SetItem("frame_count", completedScene->frame_count);
+            completed.SetItem("start_ts", completedScene->start_ts);
+            completed.SetItem("end_ts", completedScene->end_ts);
+            result.SetItem("completed_scene", completed);
         }
 
         return result;

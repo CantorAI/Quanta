@@ -1,4 +1,5 @@
 #include "partitioned_vdb.h"
+#include "vector_input.h"
 #include <ctime>
 #include <algorithm>
 #include <fstream> // Added for file operations
@@ -94,31 +95,11 @@ namespace Quanta
     // Constructor / Destructor
     // ============================================================================
 
-    PartitionedVdb::PartitionedVdb(X::ARGS& params, X::KWARGS& kwParams)
+    PartitionedVdb::PartitionedVdb(std::shared_ptr<QuantaContext> context,
+        std::weak_ptr<VdbCache> cache, std::string key)
+        : context_(std::move(context)), cache_(std::move(cache)), cache_key_(std::move(key))
     {
-        
-        std::string path = "";
-        std::string prefix = "vdb";
-        if (auto it = kwParams.find("path"); it) {
-            path = it->val.ToString();
-            if (!path.empty()) {
-                path = fs::absolute(fs::path(path)).make_preferred().string();
-            }
-        }
-        if (auto it = kwParams.find("prefix"); it) prefix = it->val.ToString();
-
-        bool isNew = !QuantaHost::I().HasPartitionedVdb(path, prefix);
-
-        // Always bootstrap the config for brand new instances, even if parameters are fully empty (e.g., lookups)
-        if (isNew) {
-            X::Value retValue;
-            Init(nullptr, nullptr, params, kwParams, retValue);
-            X::XPackageValue<PartitionedVdb> PVDB(this);
-			X::Value vdbValue = PVDB;
-			QuantaHost::I().RegisterPartitionedVdb(path, prefix, vdbValue);
-        }
-
-        // Initialize default partition (index 0)
+        metric_source_->database = this;
         customPartitionTags_[0].insert("default");
         tagToIndex_["default"] = 0;
     }
@@ -126,7 +107,11 @@ namespace Quanta
 
     PartitionedVdb::~PartitionedVdb()
     {
-        Close();
+        {
+            std::lock_guard<std::mutex> lock(metric_source_->mutex);
+            metric_source_->database = nullptr;
+        }
+        try { Close(); } catch (...) {}
         
         std::lock_guard<std::mutex> lock(partitions_mutex_);
         partitions_.clear();
@@ -138,17 +123,20 @@ namespace Quanta
 
     void PartitionedVdb::SetConfig(const std::string& key, const std::string& value)
     {
+        std::lock_guard<std::recursive_mutex> metadata_lock(metadata_mutex_);
         config_[key] = value;
     }
 
     std::string PartitionedVdb::GetConfig(const std::string& key, const std::string& defaultVal)
     {
+        std::lock_guard<std::recursive_mutex> metadata_lock(metadata_mutex_);
         auto it = config_.find(key);
         return (it != config_.end()) ? it->second : defaultVal;
     }
 
     void PartitionedVdb::ApplyConfigToMembers()
     {
+        std::lock_guard<std::recursive_mutex> metadata_lock(metadata_mutex_);
         prefix_ = GetConfig("prefix", "vdb");
         tsGranularity_ = GetConfig("granularity", "daily");
         dimension_ = std::stoi(GetConfig("dimension", "512"));
@@ -166,6 +154,7 @@ namespace Quanta
 
     void PartitionedVdb::UpdateConfigFromMembers()
     {
+        std::lock_guard<std::recursive_mutex> metadata_lock(metadata_mutex_);
         SetConfig("prefix", prefix_);
         SetConfig("granularity", tsGranularity_);
         SetConfig("dimension", std::to_string(dimension_));
@@ -324,6 +313,7 @@ namespace Quanta
 
     int PartitionedVdb::GetOrCreateCustomIndex(const std::string& tag)
     {
+        std::lock_guard<std::recursive_mutex> metadata_lock(metadata_mutex_);
         if (tag.empty() || tag == "default") {
             return 0;
         }
@@ -349,6 +339,7 @@ namespace Quanta
 
     int PartitionedVdb::GetCustomIndex(const std::string& tag)
     {
+        std::lock_guard<std::recursive_mutex> metadata_lock(metadata_mutex_);
         if (tag.empty() || tag == "default") return 0;
         auto it = tagToIndex_.find(tag);
         return (it != tagToIndex_.end()) ? it->second : -1;
@@ -368,6 +359,7 @@ namespace Quanta
 
     bool PartitionedVdb::AddPartitionTag(int index, const std::string& tag)
     {
+        std::lock_guard<std::recursive_mutex> metadata_lock(metadata_mutex_);
         if (customPartitionTags_.find(index) == customPartitionTags_.end()) {
             return false;
         }
@@ -592,6 +584,7 @@ namespace Quanta
         }
 
         // Include in-memory partitions not yet saved or actively being written
+        std::lock_guard<std::mutex> lock(partitions_mutex_);
         for (const auto& [key, partition] : partitions_) {
             if (std::find(result.begin(), result.end(), key) != result.end()) continue;
 
@@ -625,12 +618,13 @@ namespace Quanta
     // Public API: Init
     // ============================================================================
 
-    bool PartitionedVdb::Init(X::XRuntime* rt, X::XObj* pContext,
-        X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
+    X::Value PartitionedVdb::Init(const X::ARGS& params, const X::KWARGS& kwParams)
     {
+        if (m_config) throw X::Error("Create a new PartitionedVdb to reopen a database");
+        X::Value retValue;
         // Required: prefix
-        if (auto it = kwParams.find("prefix"); it) {
-            prefix_ = it->val.ToString();
+        if (auto it = Keyword(kwParams, "prefix"); it) {
+            prefix_ = (*it).ToString();
         }
         else if (params.size() >= 1) {
             prefix_ = params[0].ToString();
@@ -639,10 +633,12 @@ namespace Quanta
             prefix_ = "vdb";
         }
         SetConfig("prefix", prefix_);
+        if (prefix_.empty() || prefix_.find_first_of("/\\:") != std::string::npos || prefix_ == "." || prefix_ == "..")
+            throw X::Error("Invalid Quanta database prefix");
 
         // Required: path
-        if (auto it = kwParams.find("path"); it) {
-            basePath_ = it->val.ToString();
+        if (auto it = Keyword(kwParams, "path"); it) {
+            basePath_ = (*it).ToString();
         }
         else if (params.size() >= 2) {
             basePath_ = params[1].ToString();
@@ -656,19 +652,16 @@ namespace Quanta
 
         // 1. Initialize configuration manager and load saved DB config first!
         m_config = std::make_unique<VdbConfig>();
-        X::Runtime runtimeWrapper;
-        if (rt != nullptr) {
-            runtimeWrapper = X::Runtime(rt);
-        }
-        bool db_ready = m_config->Init(runtimeWrapper, basePath_, prefix_, customPartitionTags_);
+        bool db_ready = m_config->Init(Host(), basePath_, prefix_, customPartitionTags_);
+        if (!db_ready) throw X::Error("Cannot open Quanta configuration database");
         if (db_ready) {
             m_config->LoadConfigToMap(config_);
         }
 
         // 2. Parse explicit parameters into config map - EXPLICIT kwargs OVERRIDE DB!
         auto parseParam = [this, &kwParams](const std::string& key, const std::string& defaultVal) {
-            if (auto it = kwParams.find(key.c_str()); it) {
-                SetConfig(key, it->val.ToString());
+            if (auto it = Keyword(kwParams, key.c_str()); it) {
+                SetConfig(key, (*it).ToString());
             }
             else {
                 // If not in kwargs and not loaded from DB, use generic default
@@ -679,8 +672,8 @@ namespace Quanta
         };
 
         // Handle dim as alias for dimension
-        if (auto it = kwParams.find("dim"); it) {
-            SetConfig("dimension", it->val.ToString());
+        if (auto it = Keyword(kwParams, "dim"); it) {
+            SetConfig("dimension", (*it).ToString());
         }
 
         // Optional parameters with defaults
@@ -695,6 +688,7 @@ namespace Quanta
         parseParam("ttl_minutes", "3");
         parseParam("auto_save_seconds", "300");
         parseParam("wal_cooling_time_seconds", "60");
+        if (auto value = Keyword(kwParams, "max_elements")) SetConfig("max_elements", value->ToString());
         
         if (config_.find("next_custom_index") == config_.end()) {
             SetConfig("next_custom_index", "1");
@@ -702,6 +696,9 @@ namespace Quanta
 
         // 3. Apply fully resolved config to member variables (now safely uses loaded maxMemoryGb_)
         ApplyConfigToMembers();
+
+        if (dimension_ <= 0 || M_ < 2 || maxMemoryGb_ <= 0 || efConstruction_ <= 0 || efSearch_ <= 0)
+            throw X::Error("Invalid partitioned vector database parameters");
 
         // 4. Determine bucket max_elements_. Prioritize exact DB value over dynamic recalculations.
         if (config_.find("max_elements") != config_.end()) {
@@ -727,6 +724,7 @@ namespace Quanta
 
         if (db_ready) {
             // Rebuild reverse lookup
+            if (!maxElements_) throw X::Error("max_elements must be positive");
             tagToIndex_.clear();
             for (const auto& [idx, tagSet] : customPartitionTags_) {
                 for (const auto& t : tagSet) {
@@ -758,7 +756,7 @@ namespace Quanta
         for (const auto& entry : fs::directory_iterator(basePath_)) {
             if (entry.is_regular_file()) {
                 std::string fname = entry.path().filename().string();
-                if (fname.find(".wal_") != std::string::npos) {
+                if (OwnsWal(fname)) {
                     orphaned_wals.push_back(fname);
                 }
             }
@@ -780,63 +778,70 @@ namespace Quanta
         ingestion_thread_ = std::thread(&PartitionedVdb::IngestionLoop, this);
 
         retValue = X::Value(true);
-        return true;
+        return retValue;
+
     }
 
     void PartitionedVdb::RegMetrics()
     {
-        X::Value cantor = QuantaHost::I().GetCantor();
+        X::Value cantor = context_->Cantor();
         if (!cantor.IsObject()) return;
 
         metrics_mgr_ = cantor["Metrics"]();
         registerMetrics_ = metrics_mgr_["registerMetrics"];
 
-        auto regMetric = [cantor, this](const std::string& suffix, auto func) {
+        auto regMetric = [&, this](const std::string& suffix, int kind) {
             std::string metricName = prefix_ + "_" + suffix;
-            X::Func metricFetch(metricName.c_str(),
-                (X::U_FUNC)[func](X::XRuntime* rt, X::XObj* pThis, X::XObj* pContext,
-                    X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
-                {
-                    retValue = func();
-                    return true;
-                });
-            registerMetrics_(cantor, metricName, metricFetch);
+            auto metric = VdbMetric::APISET().CreateInstance(Host(), context_->metric_class,
+                std::make_unique<VdbMetric>(metric_source_, kind));
+            registerMetrics_(cantor, metricName, metric["Fetch"]);
         };
 
-        regMetric("active_lookups", [this]() { return active_lookups_.load(); });
-        regMetric("total_lookups", [this]() { return total_lookups_.load(); });
-        regMetric("total_records", [this]() { return total_records_.load(); });
-        regMetric("total_buckets", [this]() { return total_buckets_.load(); });
-        regMetric("max_elements_bound", [this]() { return static_cast<long long>(maxElements_); });
-        
-        regMetric("loaded_buckets", [this]() { 
-            std::lock_guard<std::mutex> lock(partitions_mutex_);
-            return static_cast<long long>(partitions_.size()); 
-        });
+        regMetric("active_lookups", 0);
+        regMetric("total_lookups", 1);
+        regMetric("total_records", 2);
+        regMetric("total_buckets", 3);
+        regMetric("max_elements_bound", 4);
+        regMetric("loaded_buckets", 5);
+        regMetric("pending_wals", 6);
+        regMetric("ingestion_queue", 7);
+    }
 
-        regMetric("pending_wals", [this]() {
-            std::unique_lock<std::mutex> wlock(wals_mutex_);
-            return static_cast<long long>(pending_wals_.size());
-        });
+    long long VdbMetric::Fetch() {
+        std::lock_guard<std::mutex> guard(source_->mutex);
+        auto* db = source_->database;
+        if (!db) return 0;
+        switch (kind_) {
+        case 0: return db->active_lookups_.load();
+        case 1: return db->total_lookups_.load();
+        case 2: return db->total_records_.load();
+        case 3: return db->total_buckets_.load();
+        case 4: return static_cast<long long>(db->maxElements_);
+        case 5: { std::lock_guard<std::mutex> lock(db->partitions_mutex_); return db->partitions_.size(); }
+        case 6: { std::lock_guard<std::mutex> lock(db->wals_mutex_); return db->pending_wals_.size(); }
+        case 7: { std::lock_guard<std::mutex> lock(db->ingestion_mutex_); return db->ingestion_queue_.size(); }
+        default: return 0;
+        }
+    }
 
-        regMetric("ingestion_queue", [this]() {
-            std::lock_guard<std::mutex> qLock(ingestion_mutex_);
-            return static_cast<long long>(ingestion_queue_.size());
-        });
+    X::Value PartitionedVdb::CreateTracker(const X::ARGS& args, const X::KWARGS& kwargs) {
+        if (is_closed_) throw X::Error("PartitionedVdb is closed");
+        return SceneTracker::APISET().CreateInstance(Host(), context_->tracker_class,
+            std::make_unique<SceneTracker>(X::Value(Host(), self_, true), args, kwargs));
     }
 
     // ============================================================================
     // Public API: AddVectors
     // ============================================================================
 
-    void PartitionedVdb::AddVectors(X::XRuntime* rt, X::XObj* pContext,
-        X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
+    X::Value PartitionedVdb::AddVectors(const X::ARGS& params, const X::KWARGS& kwParams)
     {
+        X::Value retValue;
         auto t0 = std::chrono::high_resolution_clock::now();
 
         if (params.size() < 2) {
             retValue = X::Value(false);
-            return;
+            return retValue;
         }
 
         // Parse kwParams
@@ -844,68 +849,45 @@ namespace Quanta
         std::string partitionTag = "default";
         int numThreads = -1;
 
-        if (auto it = kwParams.find("timestamp"); it) {
-            timestampMs = it->val.ToLongLong();
+        if (auto it = Keyword(kwParams, "timestamp"); it) {
+            timestampMs = (*it).ToLongLong();
         }
-        if (auto it = kwParams.find("partition"); it) {
-            partitionTag = it->val.ToString();
+        if (auto it = Keyword(kwParams, "partition"); it) {
+            partitionTag = (*it).ToString();
         }
-        if (auto it = kwParams.find("num_threads"); it) {
-            numThreads = it->val.ToInt();
+        if (auto it = Keyword(kwParams, "num_threads"); it) {
+            numThreads = (*it).ToLongLong();
         }
 
         // Validate basic dimensions and setup vector parsing for queue
-        X::Value vecVal = params[1];
-        long long totalCount = 0;
-        std::vector<float> data;
-        const float* rawPtr = nullptr;
-
-        if (vecVal.IsTensor()) {
-            X::Tensor vecT0(vecVal);
-            X::Value vecValCont = vecVal;
-            if (vecT0->GetDataType() != X::TensorDataType::FLOAT) {
-                vecValCont = vecT0->ToType(X::TensorDataType::FLOAT);
-            }
-            X::Tensor vecT(vecValCont);
-            totalCount = vecT->GetCount();
-            if (totalCount > 0 && dimension_ > 0 && totalCount % dimension_ == 0) {
-                data.resize(totalCount);
-                memcpy(data.data(), vecT->GetData(), totalCount * sizeof(float));
-                rawPtr = data.data();
-            }
-        } else if (vecVal.IsList()) {
-            X::List lst(vecVal);
-            totalCount = lst.Size();
-            if (totalCount > 0 && dimension_ > 0 && totalCount % dimension_ == 0) {
-                data.resize(totalCount);
-                for (long long i = 0; i < totalCount; i++) {
-                    data[i] = (float)lst[i];
-                }
-                rawPtr = data.data();
-            }
+        if (is_closed_) throw X::Error("PartitionedVdb is closed");
+        FloatInput input(params[1]);
+        {
+            std::lock_guard<std::mutex> lock(error_mutex_);
+            if (!background_error_.empty()) throw X::Error(background_error_);
         }
+        const auto totalCount = input.size();
+        const float* rawPtr = input.data();
 
         if (rawPtr == nullptr || totalCount == 0 || dimension_ <= 0 || totalCount % dimension_ != 0) {
             retValue = X::Value(false);
-            return;
+            return retValue;
         }
 
         size_t n = totalCount / dimension_;
-        total_add_vectors_ += n;
-        total_records_ += n;
 
         // Build external IDs
         std::vector<unsigned long long> extIds(n);
         X::Value idsVal = params[0];
 
-        if (idsVal.IsList()) {
-            X::List list(idsVal);
-            if (list->Size() != n) {
+        if (IsSequence(idsVal)) {
+            X::Value list(idsVal);
+            if (list.Size() != n) {
                 retValue = X::Value(false);
-                return;
+                return retValue;
             }
             size_t i = 0;
-            for (auto item : *list) {
+            for (uint64_t list_index=0; list_index<list.Size(); ++list_index) { auto item=list.Get(list_index);
                 extIds[i++] = item.ToLongLong();
             }
         }
@@ -918,13 +900,13 @@ namespace Quanta
 
         // Collect chunk texts
         std::vector<std::string> chunkTexts(n);
-        if (auto it = kwParams.find("chunks"); it) {
-            X::Value chunksVal = it->val;
-            if (chunksVal.IsList()) {
-                X::List list(chunksVal);
-                if (list->Size() == n) {
+        if (auto it = Keyword(kwParams, "chunks"); it) {
+            X::Value chunksVal = (*it);
+            if (IsSequence(chunksVal)) {
+                X::Value list(chunksVal);
+                if (list.Size() == n) {
                     size_t i = 0;
-                    for (auto item : *list) {
+                    for (uint64_t list_index=0; list_index<list.Size(); ++list_index) { auto item=list.Get(list_index);
                         chunkTexts[i++] = item.ToString();
                     }
                 }
@@ -946,13 +928,16 @@ namespace Quanta
         task.numThreads = numThreads;
         task.extIds = std::move(extIds);
         task.chunkTexts = std::move(chunkTexts);
-        task.vectors.assign(rawPtr, rawPtr + totalCount);
+        task.vectors = input.Take();
         task.n = n;
         task.dimension = dimension_;
 
         {
             std::lock_guard<std::mutex> qLock(ingestion_mutex_);
+            if (is_closed_) throw X::Error("PartitionedVdb is closed");
             ingestion_queue_.push(std::move(task));
+            total_add_vectors_ += n;
+            total_records_ += n;
         }
         ingestion_cv_.notify_one();
 
@@ -963,11 +948,13 @@ namespace Quanta
         }
 
         retValue = X::Value(lastAssignedId);
+        return retValue;
     }
 
     void PartitionedVdb::IngestionLoop()
     {
-        while (!stop_thread_) {
+        try {
+        while (true) {
             AsyncAddTask task;
             {
                 std::unique_lock<std::mutex> lock(ingestion_mutex_);
@@ -987,10 +974,14 @@ namespace Quanta
             std::string tsPartition = TimestampToPartitionName(task.timestampMs);
             int customIndex = GetOrCreateCustomIndex(task.partitionTag);
 
+            size_t first = 0;
+            while (first < task.n) {
             std::shared_ptr<VdbBucket> partition = GetOrCreatePartition(tsPartition, customIndex);
-            if (!partition) continue;
+            if (!partition) throw X::Error("Cannot create Quanta partition");
+            const auto count = std::min(task.n - first, maxElements_ - partition->GetTotalInsertedCount());
+            if (!count) throw X::Error("Quanta partition has no remaining capacity");
 
-            const float* rawPtr = task.vectors.data();
+            const float* rawPtr = task.vectors.data() + first * task.dimension;
 
             if (task.timestampMs > 0) {
                 long long current_start = partition->GetTsStart();
@@ -1010,15 +1001,17 @@ namespace Quanta
                     std::chrono::system_clock::now().time_since_epoch()).count();
                 
                 if (partition->active_wal_filename_.empty()) {
-                    partition->active_wal_filename_ = partition->GetKey() + ".wal_" + std::to_string(now_ms);
+                    partition->active_wal_filename_ = prefix_ + "." + partition->GetKey() + ".wal_" +
+                        std::to_string(now_ms) + "_" + std::to_string(++wal_sequence_);
                 }
 
                 // WAL appended securely inside the bucket lock to prevent concurrent Windows file handle collisions
                 // and orphaned files during background queue rotation.
-                BucketStorage::AppendWalRecord(basePath_, partition->active_wal_filename_, task.extIds, task.chunkTexts, task.timestampMs, rawPtr, task.n, task.dimension);
+                if (!BucketStorage::AppendWalRecord(basePath_, partition->active_wal_filename_, task.extIds, task.chunkTexts, task.timestampMs, rawPtr, count, task.dimension, first))
+                    throw X::Error("Failed to append Quanta WAL: " + partition->active_wal_filename_);
 
-                partition->active_wal_record_count_ += task.n;
-                partition->IncrementTotalInsertedCount(task.n);
+                partition->active_wal_record_count_ += static_cast<int>(count);
+                partition->IncrementTotalInsertedCount(count);
                 partition->last_wal_append_ms_ = now_ms;
                 
                 if (partition->active_wal_record_count_ >= wal_rotation_threshold_) {
@@ -1032,21 +1025,30 @@ namespace Quanta
                     partition->active_wal_record_count_ = 0;
                 }
             }
+            first += count;
+            }
 
             auto t1 = std::chrono::high_resolution_clock::now();
             double store_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
             // Optional logger integration could go here
         }
+        } catch (const std::exception& error) { RecordBackgroundError(error.what()); }
+        catch (...) { RecordBackgroundError("Unexpected ingestion failure"); }
     }
 
-    bool PartitionedVdb::QueryLabelByID(X::XRuntime* rt, X::XObj* pContext,
-        X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
+    void PartitionedVdb::RecordBackgroundError(const std::string& message) {
+        std::lock_guard<std::mutex> lock(error_mutex_);
+        if (background_error_.empty()) background_error_ = message;
+    }
+
+    X::Value PartitionedVdb::QueryLabelByID(const X::ARGS& params, const X::KWARGS& kwParams)
     {
+        X::Value retValue;
         if (params.size() < 1)
         {
-            return false;
+            return retValue;
         }
-        unsigned long long id = (unsigned long long)params[0];
+        unsigned long long id = static_cast<unsigned long long>(params[0].ToLongLong());
 
         // Check if timestamp and/or partition are specified
         bool hasTimestamp = false;
@@ -1054,12 +1056,12 @@ namespace Quanta
         long long timestampMs = 0;
         std::string partitionTag;
 
-        if (auto it = kwParams.find("timestamp"); it) {
-            timestampMs = it->val.ToLongLong();
+        if (auto it = Keyword(kwParams, "timestamp"); it) {
+            timestampMs = (*it).ToLongLong();
             hasTimestamp = true;
         }
-        if (auto it = kwParams.find("partition"); it) {
-            partitionTag = it->val.ToString();
+        if (auto it = Keyword(kwParams, "partition"); it) {
+            partitionTag = (*it).ToString();
             hasPartition = true;
         }
 
@@ -1068,26 +1070,25 @@ namespace Quanta
             int customIndex = GetCustomIndex(partitionTag);
             if (customIndex < 0) {
                 retValue = X::Value();
-                return false;
+                return retValue;
             }
 
             std::set<int> indices = { customIndex };
             std::vector<std::string> matchingKeys = ScanMatchingPartitions(timestampMs, timestampMs, indices);
 
             for (const auto& key : matchingKeys) {
-                std::shared_ptr<Quanta::VdbBucket> pPart = partitions_.count(key) ?
-                    partitions_[key] : LoadPartition(key);
+                std::shared_ptr<Quanta::VdbBucket> pPart = LoadPartition(key);
 
                 if (pPart) {
                     std::string label = pPart->GetTextById(id);
                     if (!label.empty()) {
-                        retValue = label;
-                        return true;
+                        retValue = X::Value::String(Host(), label);
+                        return retValue;
                     }
                 }
             }
             retValue = X::Value();
-            return false;
+            return retValue;
         }
 
         // If only partition is specified, search all time partitions for that custom index
@@ -1095,26 +1096,25 @@ namespace Quanta
             int customIndex = GetCustomIndex(partitionTag);
             if (customIndex < 0) {
                 retValue = X::Value();
-                return false;
+                return retValue;
             }
 
             std::set<int> indices = { customIndex };
             std::vector<std::string> matchingKeys = ScanMatchingPartitions(0, LLONG_MAX, indices);
 
             for (const auto& key : matchingKeys) {
-                std::shared_ptr<Quanta::VdbBucket> partition = partitions_.count(key) ?
-                    partitions_[key] : LoadPartition(key);
+                std::shared_ptr<Quanta::VdbBucket> partition = LoadPartition(key);
 
                 if (partition) {
                     std::string label = partition->GetTextById(id);
                     if (!label.empty()) {
-                        retValue = label;
-                        return true;
+                        retValue = X::Value::String(Host(), label);
+                        return retValue;
                     }
                 }
             }
             retValue = X::Value();
-            return false;
+            return retValue;
         }
 
         // If only timestamp is specified, search all custom indices for that time partition
@@ -1129,20 +1129,19 @@ namespace Quanta
                 // Only check keys that match our time partition
                 size_t first_under = key.find('_');
                 if (first_under != std::string::npos && key.substr(0, first_under) == tsPartition) {
-                    std::shared_ptr<Quanta::VdbBucket> pPart = partitions_.count(key) ?
-                        partitions_[key] : LoadPartition(key);
+                    std::shared_ptr<Quanta::VdbBucket> pPart = LoadPartition(key);
 
                     if (pPart) {
                         std::string label = pPart->GetTextById(id);
                         if (!label.empty()) {
-                            retValue = label;
-                            return true;
+                            retValue = X::Value::String(Host(), label);
+                            return retValue;
                         }
                     }
                 }
             }
             retValue = X::Value();
-            return false;
+            return retValue;
         }
 
         // Neither timestamp nor partition specified - search ALL partitions
@@ -1150,29 +1149,29 @@ namespace Quanta
         std::vector<std::string> allKeys = ScanMatchingPartitions(0, LLONG_MAX, emptySet);
 
         for (const auto& key : allKeys) {
-            std::shared_ptr<Quanta::VdbBucket> pPart = partitions_.count(key) ?
-                partitions_[key] : LoadPartition(key);
+            std::shared_ptr<Quanta::VdbBucket> pPart = LoadPartition(key);
 
             if (pPart) {
                 std::string label = pPart->GetTextById(id);
                 if (!label.empty()) {
-                    retValue = label;
-                    return true;
+                    retValue = X::Value::String(Host(), label);
+                    return retValue;
                 }
             }
         }
 
         retValue = X::Value();
-        return false;
+        return retValue;
+
     }
 
     // ============================================================================
     // Public API: Lookup
     // ============================================================================
 
-    void PartitionedVdb::Lookup(X::XRuntime* rt, X::XObj* pContext,
-        X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue)
+    X::Value PartitionedVdb::Lookup(const X::ARGS& params, const X::KWARGS& kwParams)
     {
+        X::Value retValue;
         struct ScopedLookup {
             std::atomic<long long>& active_;
             ScopedLookup(std::atomic<long long>& a) : active_(a) { active_++; }
@@ -1182,71 +1181,46 @@ namespace Quanta
         total_lookups_++;
         if (params.size() < 2) {
             retValue = X::Value();
-            return;
+            return retValue;
         }
 
         X::Value vecVal = params[0];
-        int topK = params[1].ToInt();
+        int topK = params[1].ToLongLong();
 
-        if (!vecVal.IsTensor() && !vecVal.IsList()) {
-            retValue = X::Value();
-            return;
-        }
-
-        std::vector<float> query;
-        if (vecVal.IsTensor()) {
-            X::Tensor vecT0(vecVal);
-            X::Value vecValCont = vecVal;
-            if (vecT0->GetDataType() != X::TensorDataType::FLOAT) {
-                vecValCont = vecT0->ToType(X::TensorDataType::FLOAT);
-            }
-            X::Tensor vecT(vecValCont);
-            long long totalCount = vecT->GetCount();
-            if (totalCount > 0) {
-                query.resize(totalCount);
-                memcpy(query.data(), vecT->GetData(), totalCount * sizeof(float));
-            }
-        } else if (vecVal.IsList()) {
-            X::List lst(vecVal);
-            long long totalCount = lst.Size();
-            if (totalCount > 0) {
-                query.resize(totalCount);
-                for (long long i = 0; i < totalCount; i++) {
-                    query[i] = (float)lst[i];
-                }
-            }
-        }
+        if (is_closed_) throw X::Error("PartitionedVdb is closed");
+        if (topK <= 0) throw X::Error("topK must be positive");
+        auto query = FloatInput(vecVal).Take();
 
         if (query.empty() || query.size() != dimension_) {
             retValue = X::Value();
-            return;
+            return retValue;
         }
 
         // Parse dedup threshold
         float dedupThreshold = -1.0f;
-        if (auto it = kwParams.find("dedup"); it) {
-            dedupThreshold = static_cast<float>(it->val.ToDouble());
+        if (auto it = Keyword(kwParams, "dedup"); it) {
+            dedupThreshold = static_cast<float>((*it).ToDouble());
         }
 
         // Parse time range filters (milliseconds)
         long long tsStartMs = 0;
         long long tsEndMs = 0;
 
-        if (auto it = kwParams.find("ts_start"); it) {
-            tsStartMs = it->val.ToLongLong();
+        if (auto it = Keyword(kwParams, "ts_start"); it) {
+            tsStartMs = (*it).ToLongLong();
         }
-        if (auto it = kwParams.find("ts_end"); it) {
-            tsEndMs = it->val.ToLongLong();
+        if (auto it = Keyword(kwParams, "ts_end"); it) {
+            tsEndMs = (*it).ToLongLong();
         }
 
         // Parse partition filters
         std::set<int> customIndices;
-        if (auto it = kwParams.find("partitions"); it) {
-            X::Value partVal = it->val;
-            if (partVal.IsList()) {
-                X::List list(partVal);
+        if (auto it = Keyword(kwParams, "partitions"); it) {
+            X::Value partVal = (*it);
+            if (IsSequence(partVal)) {
+                X::Value list(partVal);
                 std::vector<std::string> tags;
-                for (auto item : *list) {
+                for (uint64_t list_index=0; list_index<list.Size(); ++list_index) { auto item=list.Get(list_index);
                     tags.push_back(item.ToString());
                 }
                 customIndices = ResolveTagsToIndices(tags);
@@ -1256,8 +1230,8 @@ namespace Quanta
                 if (idx >= 0) customIndices.insert(idx);
             }
         }
-        if (auto it = kwParams.find("partition"); it) {
-            int idx = GetCustomIndex(it->val.ToString());
+        if (auto it = Keyword(kwParams, "partition"); it) {
+            int idx = GetCustomIndex((*it).ToString());
             if (idx >= 0) customIndices.insert(idx);
         }
 
@@ -1265,8 +1239,8 @@ namespace Quanta
         std::vector<std::string> matchingKeys = ScanMatchingPartitions(tsStartMs, tsEndMs, customIndices);
 
         if (matchingKeys.empty()) {
-            retValue = X::List();
-            return;
+            retValue = X::Value::List(Host());
+            return retValue;
         }
 
         // Results: id, score, chunk_text, partition_key, timestamp_ms
@@ -1353,23 +1327,24 @@ namespace Quanta
             });
 
         // Return top K (5-element tuples: id, score, chunk, key, timestamp_ms)
-        X::List resultList;
+        auto resultList = X::Value::List(Host());
         size_t count = static_cast<size_t>(topK);
         if (allResults.size() < count) {
             count = allResults.size();
         }
         for (size_t i = 0; i < count; ++i) {
             auto& r = allResults[i];
-            X::List item;
-            item += static_cast<long long>(std::get<0>(r));
-            item += std::get<1>(r);
-            item += std::get<2>(r);
-            item += std::get<3>(r);
-            item += static_cast<long long>(std::get<4>(r));
-            resultList->AddItem(item);
+            auto item = X::Value::List(Host());
+            item.Append(static_cast<long long>(std::get<0>(r)));
+            item.Append(std::get<1>(r));
+            item.Append(std::get<2>(r));
+            item.Append(std::get<3>(r));
+            item.Append(static_cast<long long>(std::get<4>(r)));
+            resultList.Append(item);
         }
 
         retValue = resultList;
+        return retValue;
     }
 
     // ============================================================================
@@ -1381,7 +1356,7 @@ namespace Quanta
     // Returns the resolved partition key string (e.g. "2024-01_2") and sets
     // customIndexUnknown=true when the tag wasn't found in the registry.
     std::string PartitionedVdb::ResolveItemPartitionKey(
-        X::Dict& dict,
+        X::Value& dict,
         const std::string& fullPartitionKey,
         const std::string& partitionKey,
         const std::string& timestampKey,
@@ -1391,7 +1366,7 @@ namespace Quanta
 
         // Prefer a pre-built full key (e.g. "partition" field from Lookup results)
         if (!fullPartitionKey.empty()) {
-            X::Value fpkVal = dict->Get(fullPartitionKey);
+            X::Value fpkVal = dict[fullPartitionKey];
             if (fpkVal.IsValid()) {
                 return fpkVal.ToString();
             }
@@ -1399,13 +1374,13 @@ namespace Quanta
 
         // Fall back: construct from timestamp + partition tag
         long long timestampMs = 0;
-        X::Value tsVal = dict->Get(timestampKey);
+        X::Value tsVal = dict[timestampKey];
         if (tsVal.IsValid()) {
             timestampMs = tsVal.ToLongLong();
         }
 
         std::string tag = "default";
-        X::Value ptVal = dict->Get(partitionKey);
+        X::Value ptVal = dict[partitionKey];
         if (ptVal.IsValid()) {
             tag = ptVal.ToString();
         }
@@ -1439,10 +1414,9 @@ namespace Quanta
 
         // Try loading from one specific partition key; returns the vector or empty.
         auto tryKey = [&](const std::string& k) -> std::vector<float> {
-            std::shared_ptr<VdbBucket> pPart = partitions_.count(k) ?
-                partitions_[k] : LoadPartition(k);
+            std::shared_ptr<VdbBucket> pPart = LoadPartition(k);
             if (!pPart) return {};
-            return pPart->GetVectorById(id);
+            return pPart->GetVectorByExternalId(id);
         };
 
         // 1. Try the primary key directly.
@@ -1517,18 +1491,18 @@ namespace Quanta
 
     // Walk the combined dict-list and populate allItems with id -> {vector}.
     void PartitionedVdb::CollectGroupingItems(
-        X::List& itemsList,
+        X::Value& itemsList,
         const std::string& idKey,
         const std::string& partitionKey,
         const std::string& timestampKey,
         const std::string& fullPartitionKey,
         GroupingItemMap& allItems)
     {
-        for (auto item : *itemsList) {
-            if (!item.IsDict()) continue;
-            X::Dict dict(item);
+        for (uint64_t itemsList_index=0; itemsList_index<itemsList.Size(); ++itemsList_index) { auto item=itemsList.Get(itemsList_index);
+            if (!IsMapping(item)) continue;
+            X::Value dict(item);
 
-            X::Value idVal = dict->Get(idKey);
+            X::Value idVal = dict[idKey];
             if (!idVal.IsValid()) continue;
             unsigned long long id = static_cast<unsigned long long>(idVal.ToLongLong());
 
@@ -1692,13 +1666,13 @@ namespace Quanta
         const std::vector<GroupingItem*>& items,
         const std::map<size_t, std::vector<size_t>>& groups)
     {
-        X::List result;
+        auto result = X::Value::List(Host());
         for (auto& [root, members] : groups) {
-            X::List group;
+            auto group = X::Value::List(Host());
             for (size_t idx : members) {
-                group += static_cast<long long>(items[idx]->id);
+                group.Append(static_cast<long long>(items[idx]->id));
             }
-            result->append(group);
+            result.Append(group);
         }
         return result;
     }
@@ -1707,21 +1681,20 @@ namespace Quanta
     // Public API: Grouping
     // ============================================================================
 
-    void PartitionedVdb::Grouping(X::XRuntime* rt,
-        X::XObj* pContext, X::ARGS& params,
-        X::KWARGS& kwParams, X::Value& retValue)
+    X::Value PartitionedVdb::Grouping(const X::ARGS& params, const X::KWARGS& kwParams)
     {
+        X::Value retValue;
         total_grouping_++;
         // params[0] = combined list of dicts (all candidates, VDB + SQL merged)
         // params[1] = threshold (float)
         if (params.size() < 2) {
-            retValue = X::List();
-            return;
+            retValue = X::Value::List(Host());
+            return retValue;
         }
 
-        if (!params[0].IsList()) {
-            retValue = X::List();
-            return;
+        if (!IsSequence(params[0])) {
+            retValue = X::Value::List(Host());
+            return retValue;
         }
 
         // Parse field-name overrides from keyword args
@@ -1730,16 +1703,16 @@ namespace Quanta
         std::string timestampKey   = "timestamp";
         std::string fullPartKey    = "";   // e.g. "full_partition_key" from Lookup results
 
-        if (auto it = kwParams.find("id_key"); it)             idKey        = it->val.ToString();
-        if (auto it = kwParams.find("partition_key"); it)      partitionKey = it->val.ToString();
-        if (auto it = kwParams.find("timestamp_key"); it)      timestampKey = it->val.ToString();
-        if (auto it = kwParams.find("full_partition_key"); it) fullPartKey  = it->val.ToString();
+        if (auto it = Keyword(kwParams, "id_key"); it)             idKey        = (*it).ToString();
+        if (auto it = Keyword(kwParams, "partition_key"); it)      partitionKey = (*it).ToString();
+        if (auto it = Keyword(kwParams, "timestamp_key"); it)      timestampKey = (*it).ToString();
+        if (auto it = Keyword(kwParams, "full_partition_key"); it) fullPartKey  = (*it).ToString();
 
-        float threshold = static_cast<float>(params[1]);
+        float threshold = static_cast<float>(params[1].ToDouble());
 
         // Step 1: collect all items and their vectors from the combined list
         GroupingItemMap allItems;
-        X::List combined(params[0]);
+        X::Value combined(params[0]);
         CollectGroupingItems(combined, idKey, partitionKey, timestampKey, fullPartKey, allItems);
 
         // Step 2: build a flat pointer array (only items whose vectors were resolved)
@@ -1750,8 +1723,8 @@ namespace Quanta
         }
 
         if (items.empty()) {
-            retValue = X::List();
-            return;
+            retValue = X::Value::List(Host());
+            return retValue;
         }
 
         // Step 3: cluster into compact groups using centroid similarity
@@ -1759,6 +1732,7 @@ namespace Quanta
 
         // Step 4: serialize groups into an XLang list
         retValue = BuildGroupingResult(items, groups);
+        return retValue;
     }
 
     // ============================================================================
@@ -1767,10 +1741,18 @@ namespace Quanta
 
     bool PartitionedVdb::Close()
     {
-        if (is_closed_) return true;
-        is_closed_ = true;
+        std::lock_guard<std::mutex> close_lock(close_mutex_);
+        if (is_closed_.exchange(true)) return true;
         
-        QuantaHost::I().UnregisterPartitionedVdb(basePath_.string(), prefix_);
+        X::Value retained;
+        if (auto cache = cache_.lock()) {
+            std::lock_guard<std::mutex> lock(cache->mutex);
+            auto it = cache->instances.find(cache_key_);
+            if (it != cache->instances.end()) {
+                retained = std::move(it->second);
+                cache->instances.erase(it);
+            }
+        }
         
         stop_thread_ = true;
         wals_cv_.notify_all();
@@ -1814,7 +1796,10 @@ namespace Quanta
             m_config->UpdateMetricValue("TotalBuckets", total_buckets_.load());
             m_config->Close();
         }
-        
+        {
+            std::lock_guard<std::mutex> lock(error_mutex_);
+            if (!background_error_.empty()) throw X::Error(background_error_);
+        }
         return true;
     }
 
@@ -1868,14 +1853,15 @@ namespace Quanta
 
     X::Value PartitionedVdb::ListPartitions()
     {
-        X::List result;
+        std::lock_guard<std::recursive_mutex> metadata_lock(metadata_mutex_);
+        auto result = X::Value::List(Host());
 
         std::set<int> emptySet;
         std::vector<std::string> allKeys = ScanMatchingPartitions(0, LLONG_MAX, emptySet);
 
         for (const auto& key : allKeys) {
-            X::Dict info;
-            info->Set("key", key);
+            auto info = X::Value::Dict(Host());
+            info.SetItem("key", key);
 
             size_t last_under = key.rfind('_');
             size_t first_under = key.find('_');
@@ -1885,25 +1871,26 @@ namespace Quanta
             int customIndex = std::stoi(key.substr(first_under + 1, last_under - first_under - 1));
             int bucketNum = std::stoi(key.substr(last_under + 1));
 
-            info->Set("ts_partition", tsPartition);
-            info->Set("custom_index", customIndex);
-            info->Set("bucket_num", bucketNum);
+            info.SetItem("ts_partition", tsPartition);
+            info.SetItem("custom_index", customIndex);
+            info.SetItem("bucket_num", bucketNum);
 
-            X::List tags;
+            auto tags = X::Value::List(Host());
             if (customPartitionTags_.count(customIndex)) {
                 for (const auto& tag : customPartitionTags_[customIndex]) {
-                    tags += tag;
+                tags.Append(tag);
                 }
             }
-            info->Set("tags", X::Value(tags));
+            info.SetItem("tags", X::Value(tags));
 
+            std::lock_guard<std::mutex> lock(partitions_mutex_);
             bool loaded = partitions_.count(key) > 0;
-            info->Set("loaded", loaded);
+            info.SetItem("loaded", loaded);
             if (loaded) {
-                info->Set("count", static_cast<long long>(partitions_[key]->GetCount()));
+                info.SetItem("count", static_cast<long long>(partitions_[key]->GetCount()));
             }
 
-            result->AddItem(info);
+            result.Append(info);
         }
 
         return result;
@@ -1911,40 +1898,43 @@ namespace Quanta
 
     X::Value PartitionedVdb::GetPartitionInfo(const std::string& tag)
     {
+        std::lock_guard<std::recursive_mutex> metadata_lock(metadata_mutex_);
         int idx = GetCustomIndex(tag);
         if (idx < 0) return X::Value();
 
-        X::Dict info;
-        info->Set("customIndex", idx);
+        auto info = X::Value::Dict(Host());
+        info.SetItem("customIndex", idx);
 
-        X::List tags;
+        auto tags = X::Value::List(Host());
         if (customPartitionTags_.count(idx)) {
             for (const auto& t : customPartitionTags_[idx]) {
-                tags += t;
+            tags.Append(t);
             }
         }
-        info->Set("tags", X::Value(tags));
-
-        info->Set("tags", X::Value(tags));
+        info.SetItem("tags", X::Value(tags));
 
         return info;
     }
 
     X::Value PartitionedVdb::GetHealth()
     {
-        X::Dict health;
+        auto health = X::Value::Dict(Host());
         long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-        health->Set("timestamp_ms", now_ms);
-        health->Set("is_closed", is_closed_.load());
+        health.SetItem("timestamp_ms", now_ms);
+        health.SetItem("is_closed", is_closed_.load());
+        {
+            std::lock_guard<std::mutex> lock(error_mutex_);
+            health.SetItem("error", background_error_);
+        }
         
         {
             std::unique_lock<std::mutex> wlock(wals_mutex_);
-            health->Set("pending_wals", static_cast<long long>(pending_wals_.size()));
+            health.SetItem("pending_wals", static_cast<long long>(pending_wals_.size()));
         }
         {
             std::lock_guard<std::mutex> qLock(ingestion_mutex_);
-            health->Set("ingestion_queue_size", static_cast<long long>(ingestion_queue_.size()));
+            health.SetItem("ingestion_queue_size", static_cast<long long>(ingestion_queue_.size()));
         }
         
         long long total_wals_on_disk = 0;
@@ -1952,27 +1942,27 @@ namespace Quanta
             for (const auto& entry : fs::directory_iterator(basePath_)) {
                 if (entry.is_regular_file()) {
                     std::string fname = entry.path().filename().string();
-                    if (fname.find(".wal_") != std::string::npos) {
+                    if (OwnsWal(fname)) {
                         total_wals_on_disk++;
                     }
                 }
             }
         } catch (...) {}
-        health->Set("total_wals", total_wals_on_disk);
+        health.SetItem("total_wals", total_wals_on_disk);
 
         long long loaded_buckets = 0;
         {
             std::lock_guard<std::mutex> lock(partitions_mutex_);
             loaded_buckets = partitions_.size();
         }
-        health->Set("loaded_buckets", loaded_buckets);
-        health->Set("total_buckets", total_buckets_.load());
-        health->Set("max_elements_bound", static_cast<long long>(maxElements_));
-        health->Set("active_lookups", active_lookups_.load());
-        health->Set("total_lookups", total_lookups_.load());
-        health->Set("total_add_vectors", total_add_vectors_.load());
-        health->Set("total_wals_processed", total_wals_processed_.load());
-        health->Set("total_wal_vectors_merged", total_wal_vectors_merged_.load());
+        health.SetItem("loaded_buckets", loaded_buckets);
+        health.SetItem("total_buckets", total_buckets_.load());
+        health.SetItem("max_elements_bound", static_cast<long long>(maxElements_));
+        health.SetItem("active_lookups", active_lookups_.load());
+        health.SetItem("total_lookups", total_lookups_.load());
+        health.SetItem("total_add_vectors", total_add_vectors_.load());
+        health.SetItem("total_wals_processed", total_wals_processed_.load());
+        health.SetItem("total_wal_vectors_merged", total_wal_vectors_merged_.load());
         
         return health;
     }
@@ -1984,6 +1974,7 @@ namespace Quanta
 
     bool PartitionedVdb::SetTTL(long long ttlMinutes)
     {
+        std::lock_guard<std::recursive_mutex> metadata_lock(metadata_mutex_);
         ttl_minutes_ = ttlMinutes;
         SetConfig("ttl_minutes", std::to_string(ttl_minutes_));
         if (m_config) {
@@ -1995,7 +1986,7 @@ namespace Quanta
     X::Value PartitionedVdb::PerformFullScan()
     {
         // A full scan to find total vectors, wals, buckets from disk.
-        X::Dict scanResult;
+        auto scanResult = X::Value::Dict(Host());
         long long total_vectors = 0;
         long long total_wals = 0;
         long long total_wal_files_found = 0;
@@ -2031,7 +2022,7 @@ namespace Quanta
         for (const auto& entry : fs::directory_iterator(basePath_)) {
             if (entry.is_regular_file()) {
                 std::string fname = entry.path().filename().string();
-                if (fname.find(".wal_") != std::string::npos) {
+                if (OwnsWal(fname)) {
                     total_wal_files_found++;
                     // Optional: open WAL and count records
                     // Currently just counting files
@@ -2039,10 +2030,10 @@ namespace Quanta
             }
         }
         
-        scanResult->Set("total_vectors", total_vectors);
-        scanResult->Set("total_wal_files", total_wal_files_found);
-        scanResult->Set("total_buckets", total_buckets);
-        scanResult->Set("total_partitions", total_partitions);
+        scanResult.SetItem("total_vectors", total_vectors);
+        scanResult.SetItem("total_wal_files", total_wal_files_found);
+        scanResult.SetItem("total_buckets", total_buckets);
+        scanResult.SetItem("total_partitions", total_partitions);
 
         return scanResult;
     }
@@ -2059,7 +2050,7 @@ namespace Quanta
     void PartitionedVdb::MaintenanceLoop()
     {
         try {
-            X::Value cantor = QuantaHost::I().GetCantor();
+            X::Value cantor = context_->Cantor();
             long long last_config_save_ms = 0;
             while (!stop_thread_) {
             size_t peak_queue_size = 0;
@@ -2120,9 +2111,10 @@ namespace Quanta
                     }
 
                     // 3. WAL Cooling Time Flush (Force merge if idle)
-                    if (!erased && wal_cooling_time_seconds_ > 0 && !partition->active_wal_filename_.empty()) {
+                    if (!erased && wal_cooling_time_seconds_ > 0) {
+                        std::lock_guard<std::mutex> bucket_lock(partition->GetLock());
                         long long idle_wal_ms = now_ms - partition->last_wal_append_ms_;
-                        if (idle_wal_ms > (wal_cooling_time_seconds_ * 1000LL)) {
+                        if (!partition->active_wal_filename_.empty() && idle_wal_ms > (wal_cooling_time_seconds_ * 1000LL)) {
                             {
                                 std::lock_guard<std::mutex> wlock(wals_mutex_);
                                 pending_wals_.push(partition->active_wal_filename_);
@@ -2201,7 +2193,7 @@ namespace Quanta
             }
 
             // 4. Metrics Reporting
-            X::Value cantor = QuantaHost::I().GetCantor();
+            X::Value cantor = context_->Cantor();
             if (cantor.IsObject()) {
                 X::Value metrics = cantor["Metrics"]();
                 X::Value SetWordBook = metrics["SetWordBook"];
@@ -2215,7 +2207,7 @@ namespace Quanta
                     for (const auto& entry : fs::directory_iterator(basePath_)) {
                         if (entry.is_regular_file()) {
                             std::string fname = entry.path().filename().string();
-                            if (fname.find(".wal_") != std::string::npos) {
+                            if (OwnsWal(fname)) {
                                 total_wals_on_disk++;
                             }
                         }
@@ -2248,9 +2240,9 @@ namespace Quanta
         }
         // Thread exited successfully
         } catch (const std::exception& e) {
-            // Optional logger could record generic exception here
+            RecordBackgroundError(e.what());
         } catch (...) {
-            // Optional logger could record unknown exception here
+            RecordBackgroundError("Unexpected maintenance failure");
         }
     }
 
@@ -2297,31 +2289,20 @@ namespace Quanta
             std::memcpy(&header, buffer.data() + offset, sizeof(WalRecordHeader));
             offset += sizeof(WalRecordHeader);
 
-            // Now, re-order the assignment to match AppendWalRecord's write order
-            // 1. Timestamp (already in header.timestamp_ms)
-            // 2. ID (already in header.external_id)
-            // The instruction seems to imply a direct read from buffer, but WalRecordHeader already encapsulates this.
-            // The current code already reads timestamp_ms and external_id from the header.
-            // The instruction's "Currently in ProcessWalFileBuffer" snippet does not match the provided code.
-            // Assuming the intent is to ensure the WalRecordHeader itself has the correct order if it were to be re-defined,
-            // or if the fields were read individually.
-            // Given the current structure, header.timestamp_ms and header.external_id are already available.
-            // The order of assignment to extIds and maxTs below implicitly uses these fields.
-
             size_t vector_bytes = dimension_ * sizeof(float);
-            if (offset + vector_bytes > total_size) break; // Incomplete write
+            if (vector_bytes > total_size - offset || header.chunk_text_length > total_size - offset - vector_bytes)
+                throw X::Error("Incomplete Quanta WAL record");
 
             extIds.push_back(header.external_id);
             if (header.timestamp_ms > maxTs) maxTs = header.timestamp_ms;
 
-            std::vector<float> vec(dimension_);
-            std::memcpy(vec.data(), buffer.data() + offset, vector_bytes);
-            allVectors.insert(allVectors.end(), vec.begin(), vec.end());
+            const auto start = allVectors.size();
+            allVectors.resize(start + dimension_);
+            std::memcpy(allVectors.data() + start, buffer.data() + offset, vector_bytes);
             offset += vector_bytes;
 
             std::string chunkText;
             if (header.chunk_text_length > 0) {
-                if (offset + header.chunk_text_length > total_size) break; // Incomplete string
                 chunkText.resize(header.chunk_text_length);
                 std::memcpy(&chunkText[0], buffer.data() + offset, header.chunk_text_length);
                 offset += header.chunk_text_length;
@@ -2329,7 +2310,9 @@ namespace Quanta
             chunkTexts.push_back(chunkText);
         }
 
-        // Merge organically into active physical layers natively (bypass RAM duplication)
+        if (offset != total_size) throw X::Error("Incomplete Quanta WAL header");
+
+        // Merge the validated batch before removing its WAL.
         if (!extIds.empty()) {
             pPart->AddVectorsBatch(extIds, allVectors, chunkTexts, maxTs);
             SavePartition(pPart, target_key);
@@ -2344,22 +2327,25 @@ namespace Quanta
         size_t wal_pos = unmerged_wal.find(".wal_");
         if (wal_pos != std::string::npos) {
             std::string target_key = unmerged_wal.substr(0, wal_pos);
+            if (target_key.rfind(prefix_ + ".", 0) == 0) target_key.erase(0, prefix_.size() + 1);
             fs::path walPath = basePath_ / unmerged_wal;
 
             try {
                 std::vector<char> buffer;
-                if (BucketStorage::ReadWalFile(walPath, buffer)) {
-                    ProcessWalFileBuffer(target_key, buffer);
-                }
+                if (!BucketStorage::ReadWalFile(walPath, buffer)) throw X::Error("Cannot read " + walPath.string());
+                ProcessWalFileBuffer(target_key, buffer);
+                fs::remove(walPath);
             } catch (const std::exception& e) {
-                // Log and swallow exception to prevent MaintenanceThread termination
-                // The HNSW capacity limits are now dynamic, but corrupted WALs shouldn't crash the loop.
+                RecordBackgroundError(walPath.string() + ": " + e.what());
             } catch (...) {
-                // Catch any other exceptions
+                RecordBackgroundError("Failed to merge " + walPath.string());
             }
-
-            std::error_code ec;
-            fs::remove(walPath, ec);
         }
+    }
+
+    bool PartitionedVdb::OwnsWal(const std::string& filename) const {
+        const auto position = filename.find(".wal_");
+        return position != std::string::npos &&
+            (filename.rfind(prefix_ + ".", 0) == 0 || filename.find('.') == position);
     }
 } // namespace Quanta

@@ -1,81 +1,9 @@
-#include "xhost.h"
-#include "xpackage.h"
-#include "port.h"
-
-
-#if (WIN32)
-#include <Windows.h>
-#else
-#include <string.h>
-#endif
-
-#if (WIN32)
-#define X_EXPORT __declspec(dllexport) 
-#else
-#define X_EXPORT
-#endif
-
 #include "QuantaHost.h"
 
-static bool GetCurLibInfo(void* EntryFuncName, std::string& strFullPath,
-	std::string& strFolderPath, std::string& strLibName)
-{
-#if (WIN32)
-	HMODULE  hModule = NULL;
-	GetModuleHandleEx(
-		GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-		(LPCTSTR)EntryFuncName,
-		&hModule);
-	char path[MAX_PATH];
-	GetModuleFileName(hModule, path, MAX_PATH);
-	std::string strPath(path);
-	strFullPath = strPath;
-	auto pos = strPath.rfind("\\");
-	if (pos != std::string::npos)
-	{
-		strFolderPath = strPath.substr(0, pos);
-		strLibName = strPath.substr(pos + 1);
-	}
-#else
-	Dl_info dl_info;
-	dladdr((void*)EntryFuncName, &dl_info);
-	std::string strPath = dl_info.dli_fname;
-	strFullPath = strPath;
-	auto pos = strPath.rfind("/");
-	if (pos != std::string::npos)
-	{
-		strFolderPath = strPath.substr(0, pos);
-		strLibName = strPath.substr(pos + 1);
-	}
-#endif
-	//remove ext
-	pos = strLibName.rfind(".");
-	if (pos != std::string::npos)
-	{
-		strLibName = strLibName.substr(0, pos);
-	}
-	return true;
-}
-
-namespace X
-{
-	XHost* g_pXHost = nullptr;
-}
-
-extern "C"  X_EXPORT void Load(void* pHost,X::Value curModule)
-{
-	std::string strFullPath;
-	std::string strFolderPath;
-	std::string strLibName;
-	GetCurLibInfo((void *)Load, strFullPath, strFolderPath, strLibName);
-	X::g_pXHost = (X::XHost*)pHost;
-	X::Module m(curModule);
-	X::XRuntime* rt = m->GetRT();
-	Quanta::QuantaHost::I().SetDefaultRuntime(rt);
-	Quanta::QuantaHost::I().SetPath(strFolderPath, strLibName);
-	X::RegisterPackage<Quanta::QuantaHost>(strLibName.c_str(), Quanta_API_Name, &Quanta::QuantaHost::I());
-}
-extern "C"  X_EXPORT void Unload()
-{
-	X::g_pXHost = nullptr;
+extern "C" XLANG3_PACKAGE_EXPORT const uint32_t xlang3_package_abi_version = X3_ABI_VERSION;
+extern "C" XLANG3_PACKAGE_EXPORT X3Status Load(void* raw, X3Value currentModule) {
+    auto* host = static_cast<X3PackageHost*>(raw);
+    if (!host || host->abi_version != X3_ABI_VERSION) return X3_STATUS_ERROR;
+    Quanta::QuantaHost::BuildAPI();
+    return Quanta::QuantaHost::APISET().Create(host, "quanta", currentModule);
 }

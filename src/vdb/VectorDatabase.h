@@ -9,7 +9,9 @@
 #include <mutex>
 #include <fstream>
 #include <filesystem>
-#include "xlang.h"
+#include <variant>
+#include <cstdint>
+#include <type_traits>
 
 namespace Quanta {
 
@@ -94,17 +96,21 @@ namespace Quanta {
         }
 
         // Add or update a parameter.
-        void AddParameter(const std::string& key, const X::Value& val) {
+        using Parameter = std::variant<int64_t, double, std::string>;
+        template<class T> void AddParameter(const std::string& key, const T& val) {
             std::lock_guard<std::mutex> lock(mtx);
-            paramMap[key] = val;
+            if constexpr (std::is_integral_v<T>) paramMap[key] = static_cast<int64_t>(val);
+            else paramMap[key] = val;
         }
 
         // Retrieve a parameter value by key, with a default.
-        X::Value GetParam(const char* key, X::Value defaultVal) const {
+        template<class T> T GetParam(const char* key, T defaultVal) const {
             std::lock_guard<std::mutex> lock(mtx);
             auto it = paramMap.find(key);
             if (it != paramMap.end()) {
-                return it->second;
+                if constexpr (std::is_integral_v<T>) {
+                    if (auto value = std::get_if<int64_t>(&it->second)) return static_cast<T>(*value);
+                } else if (auto value = std::get_if<T>(&it->second)) return *value;
             }
             return defaultVal;
         }
@@ -150,23 +156,23 @@ namespace Quanta {
                 ofs.write(key.data(), keyLen);
 
                 // Type + value
-                X::Value val = kv.second;
+                const Parameter& val = kv.second;
                 uint8_t typeCode = 255;
-                if (val.IsLong()) {
+                if (std::holds_alternative<int64_t>(val)) {
                     typeCode = 0;
-                    long long v = static_cast<long long>(val);
+                    int64_t v = std::get<int64_t>(val);
                     ofs.write(reinterpret_cast<const char*>(&typeCode), sizeof(typeCode));
                     ofs.write(reinterpret_cast<const char*>(&v), sizeof(v));
                 }
-                else if (val.IsDouble()) {
+                else if (std::holds_alternative<double>(val)) {
                     typeCode = 1;
-                    double v = static_cast<double>(val);
+                    double v = std::get<double>(val);
                     ofs.write(reinterpret_cast<const char*>(&typeCode), sizeof(typeCode));
                     ofs.write(reinterpret_cast<const char*>(&v), sizeof(v));
                 }
-                else if (val.IsString()) {
+                else if (std::holds_alternative<std::string>(val)) {
                     typeCode = 2;
-                    std::string s = val.ToString();
+                    const std::string& s = std::get<std::string>(val);
                     ofs.write(reinterpret_cast<const char*>(&typeCode), sizeof(typeCode));
                     size_t len = s.size();
                     ofs.write(reinterpret_cast<const char*>(&len), sizeof(len));
@@ -255,18 +261,18 @@ namespace Quanta {
 
                 uint8_t typeCode;
                 ifs.read(reinterpret_cast<char*>(&typeCode), sizeof(typeCode));
-                X::Value val;
+                Parameter val;
                 switch (typeCode) {
                 case 0: {
                     long long v;
                     ifs.read(reinterpret_cast<char*>(&v), sizeof(v));
-                    val = X::Value(static_cast<int64_t>(v));
+                    val = static_cast<int64_t>(v);
                     break;
                 }
                 case 1: {
                     double v;
                     ifs.read(reinterpret_cast<char*>(&v), sizeof(v));
-                    val = X::Value(v);
+                    val = v;
                     break;
                 }
                 case 2: {
@@ -274,7 +280,7 @@ namespace Quanta {
                     ifs.read(reinterpret_cast<char*>(&len), sizeof(len));
                     std::string s(len, '\0');
                     ifs.read(&s[0], len);
-                    val = X::Value(s);
+                    val = std::move(s);
                     break;
                 }
                 default:
@@ -346,7 +352,7 @@ namespace Quanta {
     private:
         int D;  // Dimension of each vector.
         std::vector<unsigned long long> ids;                  // Record IDs.
-        std::map<std::string, X::Value> paramMap;            // Parameters.
+        std::map<std::string, Parameter> paramMap;
         std::map<unsigned long long, std::string> chunkMap;  // ID-to-text mapping.
         std::map<unsigned long long, unsigned long long> timestampMap_;  // ID-to-timestamp (ms).
         mutable std::mutex mtx;  // Protects all member data for thread safety

@@ -1,5 +1,5 @@
 #pragma once
-#include "xpackage.h"
+#include "quanta_runtime.h"
 #include "scene_tracker.h"
 #include <map>
 #include <set>
@@ -24,12 +24,38 @@ namespace Quanta
     namespace fs = std::filesystem;
     class HnswVdb;
     class VectorDatabase;
+    class PartitionedVdb;
+    struct MetricSource {
+        std::mutex mutex;
+        PartitionedVdb* database = nullptr;
+    };
+    class VdbMetric {
+        std::shared_ptr<MetricSource> source_;
+        int kind_;
+    public:
+        VdbMetric(std::shared_ptr<MetricSource> source, int kind) : source_(std::move(source)), kind_(kind) {}
+        BEGIN_PACKAGE(VdbMetric)
+            APISET().AddFunc<0>("Fetch", &VdbMetric::Fetch);
+        END_PACKAGE
+        long long Fetch();
+    };
 
     // WalRecordHeader moved to bucket_storage.h
 
     class PartitionedVdb
     {
         friend class SceneTracker;
+        friend class VdbMetric;
+        std::shared_ptr<QuantaContext> context_;
+        std::weak_ptr<VdbCache> cache_;
+        std::string cache_key_;
+        std::shared_ptr<MetricSource> metric_source_ = std::make_shared<MetricSource>();
+        mutable std::mutex error_mutex_;
+        std::string background_error_;
+        std::mutex close_mutex_;
+        mutable std::recursive_mutex metadata_mutex_;
+        void RecordBackgroundError(const std::string& message);
+        X3Value self_{}; // Borrowed; trackers retain their parent explicitly.
         std::unique_ptr<VdbConfig> m_config;
         // Config stored as map, synced to SQLite
         std::map<std::string, std::string> config_;
@@ -37,6 +63,8 @@ namespace Quanta
         // Paths
         fs::path basePath_;
         std::string prefix_;
+        uint64_t wal_sequence_ = 0;
+        bool OwnsWal(const std::string& filename) const;
 
         // Cached config values
         std::string tsGranularity_ = "hourly";
@@ -49,7 +77,7 @@ namespace Quanta
         int efSearch_ = 50;
 
         // Maintenance and TTL configuration
-        long long ttl_minutes_ = 3;
+        std::atomic<long long> ttl_minutes_{3};
         long long auto_save_seconds_ = 300;
         int max_loaded_read_only_partitions_ = 50;
 
@@ -117,28 +145,24 @@ namespace Quanta
         APISET().AddFunc<0>("GetTotalRecords", &PartitionedVdb::GetTotalRecords);
         APISET().AddFunc<0>("PerformFullScan", &PartitionedVdb::PerformFullScan);
         APISET().AddFunc<1>("SetTTL", &PartitionedVdb::SetTTL);
-        APISET().AddVarClass<SceneTracker, PartitionedVdb>("CreateTracker");
+        APISET().AddVarFunc("CreateTracker", &PartitionedVdb::CreateTracker);
         END_PACKAGE
 
-        PartitionedVdb() = default;
-        PartitionedVdb(X::ARGS& params, X::KWARGS& kwParams);
+        PartitionedVdb(std::shared_ptr<QuantaContext> context, std::weak_ptr<VdbCache> cache, std::string key);
         virtual ~PartitionedVdb();
+        void OnInstanceCreated(const X::Value& value) { self_ = value.raw(); }
+        X::Value CreateTracker(const X::ARGS&, const X::KWARGS&);
 
-        bool Init(X::XRuntime* rt, X::XObj* pContext,
-            X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
+        X::Value Init(const X::ARGS& params, const X::KWARGS& kwParams);
 
         bool Close();
         bool Save(const std::string& path);
         bool Load(const std::string& path);
 
-        void AddVectors(X::XRuntime* rt, X::XObj* pContext,
-            X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
-        bool QueryLabelByID(X::XRuntime* rt, X::XObj* pContext,
-            X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
-        void Lookup(X::XRuntime* rt, X::XObj* pContext,
-            X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
-        void Grouping(X::XRuntime* rt, X::XObj* pContext,
-            X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
+        X::Value AddVectors(const X::ARGS& params, const X::KWARGS& kwParams);
+        X::Value QueryLabelByID(const X::ARGS& params, const X::KWARGS& kwParams);
+        X::Value Lookup(const X::ARGS& params, const X::KWARGS& kwParams);
+        X::Value Grouping(const X::ARGS& params, const X::KWARGS& kwParams);
         bool AddPartitionTag(int index, const std::string& tag);
         X::Value ListPartitions();
         X::Value GetPartitionInfo(const std::string& tag);
@@ -156,7 +180,7 @@ namespace Quanta
         X::Value metrics_mgr_;
         X::Value registerMetrics_;
         
-        std::atomic<bool> is_closed_{false};
+        std::atomic<bool> is_closed_{true};
         // Asynchronous Ingestion
         std::queue<AsyncAddTask> ingestion_queue_;
         std::mutex ingestion_mutex_;
@@ -198,7 +222,7 @@ namespace Quanta
 
         // Grouping helpers
         std::string ResolveItemPartitionKey(
-            X::Dict& dict,
+            X::Value& dict,
             const std::string& fullPartitionKey,
             const std::string& partitionKey,
             const std::string& timestampKey,
@@ -210,7 +234,7 @@ namespace Quanta
             bool customIndexUnknown);
 
         void CollectGroupingItems(
-            X::List& itemsList,
+            X::Value& itemsList,
             const std::string& idKey,
             const std::string& partitionKey,
             const std::string& timestampKey,

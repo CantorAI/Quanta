@@ -1,8 +1,7 @@
 #pragma once
-#include "xpackage.h"
+#include "quanta_runtime.h"
 #include <string>
 #include <vector>
-#include "value.h"
 #include "QuantaDb.h"
 #include "FilePathIndex.h"
 
@@ -15,6 +14,8 @@ namespace Quanta
         bool m_isScanning;
 
         FilePathIndex m_filePathIndex;
+        std::unique_ptr<QuantaDb> database_;
+        QuantaDb& Database();
         // Internal helper methods
         std::string GenerateMetadata(const std::string& filePath, long long fileSize, const std::string& lastModified);
         bool Scan(std::string rootFolder, const std::vector<std::string>& excludeFolders = {}, bool skipHidden = true);
@@ -22,17 +23,11 @@ namespace Quanta
             const std::vector<std::string>& excludeFolders, bool skipHidden);
     public:
         BEGIN_PACKAGE(DfsEngine)
-            APISET().SetPackageContentProc([](void* pContextObj)
-                {
-                    return ((DfsEngine*)pContextObj)->GetContentSize();
-                },
-                [](void* pContextObj, X::XLStream* pStream)
-                {
-                    return ((DfsEngine*)pContextObj)->ToBytes(pStream);
-                },
-                [](void* pContextObj, X::XLStream* pStream)
-                {
-                    return ((DfsEngine*)pContextObj)->FromBytes(pStream);
+            APISET().AddSerializer("quanta.dfs", 1,
+                [](DfsEngine* self) { return X::Value::String(self->Host(), self->m_lastRootFolder); },
+                [](DfsEngine* self, const X::Value& state) {
+                    if (!state.IsString()) throw X::Error("invalid DFS state");
+                    self->m_lastRootFolder = state.ToString();
                 });
             APISET().AddFunc<1>("Scan", &DfsEngine::ScanAPI);
             APISET().AddFunc<1>("Query", &DfsEngine::Query);
@@ -53,25 +48,5 @@ namespace Quanta
         }
         X::Value Query(std::string filePattern);
 
-        // Content serialization methods
-        inline long long GetContentSize()
-        {
-            return m_lastRootFolder.size();
-        }
-
-        inline bool ToBytes(X::XLStream* pStream)
-        {
-            X::Value lastFolder(m_lastRootFolder);
-            bool bOK = X::g_pXHost->ConvertToBytes(lastFolder, pStream);
-            return bOK;
-        }
-
-        inline bool FromBytes(X::XLStream* pStream)
-        {
-            X::Value lastFolder;
-            bool bOK = X::g_pXHost->ConvertFromBytes(lastFolder, pStream);
-            m_lastRootFolder = lastFolder.ToString();
-            return bOK;
-        }
     };
 }

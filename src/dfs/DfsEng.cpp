@@ -9,17 +9,25 @@
 
 namespace Quanta
 {
+    QuantaDb& DfsEngine::Database() {
+        if (!database_) {
+            if (m_lastRootFolder.empty()) throw X::Error("scan a directory before building its index");
+            database_ = std::make_unique<QuantaDb>(Host());
+            database_->Start(m_lastRootFolder);
+        }
+        return *database_;
+    }
     std::string DfsEngine::GenerateMetadata(const std::string& filePath, long long fileSize, const std::string& lastModified)
     {
         std::filesystem::path path(filePath);
 
-        // Create metadata using X::Dict
-        X::Dict metadata;
-        metadata->Set("name", path.filename().string());
-        metadata->Set("extension", path.extension().string());
-        metadata->Set("size", fileSize);
-        metadata->Set("lastModified", lastModified);
-        metadata->Set("parentDir", path.parent_path().string());
+        // Create metadata using X::Value
+        auto metadata = X::Value::Dict(Host());
+        metadata.SetItem("name", path.filename().string());
+        metadata.SetItem("extension", path.extension().string());
+        metadata.SetItem("size", fileSize);
+        metadata.SetItem("lastModified", lastModified);
+        metadata.SetItem("parentDir", path.parent_path().string());
 
         // Convert to string for storage
         return metadata.ToString();
@@ -34,16 +42,20 @@ namespace Quanta
         }
 
         m_isScanning = true;
+        struct ResetScanning { bool& value; ~ResetScanning() { value = false; } } reset{m_isScanning};
+        if (!std::filesystem::is_directory(rootFolder)) throw X::Error("DFS scan root is not a directory");
 
         // Normalize root folder path (fixing the const issue)
         std::filesystem::path normalizedRoot = std::filesystem::path(rootFolder);
         normalizedRoot.make_preferred();
         m_lastRootFolder = normalizedRoot.string();
+        database_.reset();
+        Database();
 
         // Default excluded folders if not specified
         std::vector<std::string> foldersToExclude = excludeFolders;
         if (foldersToExclude.empty()) {
-            foldersToExclude = { ".git", "$RECYCLE.BIN", "System Volume Information" };
+            foldersToExclude = { ".git", "QuantaDB", "$RECYCLE.BIN", "System Volume Information" };
         }
 
         // Get the local node ID
@@ -135,18 +147,16 @@ namespace Quanta
                         std::replace(standardizedPath.begin(), standardizedPath.end(), '\\', '/');
 #endif
                         LOG << "File:" << standardizedPath << ", size: " << fileSize << LINE_END;
-                        QuantaDb::I().AddFile(standardizedPath, fileSize, nodeId, metadata);
+                        Database().AddFile(standardizedPath, fileSize, nodeId, metadata);
                     }
                 }
-                catch (const std::exception& ex) {
-                    // Log the exception for this entry, but continue with next entry
-                    // Consider adding more detailed logging here
+                catch (const std::filesystem::filesystem_error& ex) {
+                    LOG << "DFS entry: " << ex.what() << LINE_END;
                 }
             }
         }
-        catch (const std::exception& ex) {
-            // Log the exception for this folder, but don't abort the entire scan
-            // Consider adding more detailed logging here
+        catch (const std::filesystem::filesystem_error& ex) {
+            LOG << "DFS folder: " << ex.what() << LINE_END;
         }
     }
 
@@ -155,21 +165,21 @@ namespace Quanta
 #define use_idx 1
 #if use_idx
         auto ids = m_filePathIndex.SingleMatch(filePattern);
-        X::List list;
+        auto list = X::Value::List(Host());
 		for (auto id : ids)
 		{
-            list += id;
+            list.Append(id);
 		}
 		return list;
 #else
         // Use the database to query files based on the pattern
-        return QuantaDb::I().QueryFilesByPath(filePattern);
+        return Database().QueryFilesByPath(filePattern);
 #endif
     }
 
     void DfsEngine::BuildIndex(std::string indexFile)
     {
-		QuantaDb::I().EnumFiles([this](std::string& filePath) {
+		Database().EnumFiles([this](std::string& filePath) {
 			m_filePathIndex.AddFile(filePath, false);
 			}); 
 		m_filePathIndex.Save(indexFile);

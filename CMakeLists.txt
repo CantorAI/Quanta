@@ -1,4 +1,4 @@
-﻿
+
 cmake_minimum_required (VERSION 3.10)
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
@@ -23,7 +23,6 @@ include_directories("src/vdb")
 include_directories("src/dfs")
 include_directories("src/main")
 
-FILE(GLOB XLANG_API_SRC "${xlang_sdk_folder}/value.cpp")
 FILE(GLOB Common_SRC "src/common/*.cpp" "src/log/*.cpp")
 FILE(GLOB Dfs_SRC "src/dfs/*.cpp")
 FILE(GLOB Vdb_SRC "src/vdb/*.cpp")
@@ -38,13 +37,38 @@ file(COPY ${SCRIPTS_FILES} DESTINATION "${CMAKE_BINARY_DIR}/bin/Applications/qua
 
 add_library(${PROJECT_NAME} 
 	SHARED
-	${XLANG_API_SRC}
 	${Common_SRC}
 	${Main_SRC}
 	${Dfs_SRC}
 	${Vdb_SRC}
 )
-if (WIN32)
-else()
-    target_link_libraries(${PROJECT_NAME} pthread dl)
+if(NOT TARGET xlang3_runtime)
+    message(FATAL_ERROR "Quanta requires XLang3; build from CantorAIWorkspace")
+endif()
+target_link_libraries(Quanta PRIVATE xlang3_runtime ${CMAKE_DL_LIBS})
+target_compile_definitions(Quanta PRIVATE XLANG3_USE_SHARED NOMINMAX)
+target_compile_features(Quanta PRIVATE cxx_std_17)
+if(NOT WIN32)
+    target_link_libraries(Quanta PRIVATE pthread)
+endif()
+add_dependencies(Quanta xlang_sqlite3_native_package)
+
+include(CTest)
+if(BUILD_TESTING)
+    find_package(Python3 3.14...<3.15 REQUIRED COMPONENTS Interpreter)
+    add_executable(QuantaSdkTests test/native/sdk_tests.cpp)
+    target_link_libraries(QuantaSdkTests PRIVATE xlang3_runtime)
+    target_compile_definitions(QuantaSdkTests PRIVATE XLANG3_USE_SHARED)
+    add_dependencies(QuantaSdkTests Quanta)
+    add_test(NAME quanta_sdk
+        COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/test/native/run_test.py"
+            "$<TARGET_FILE:QuantaSdkTests>" "$<TARGET_FILE_DIR:Quanta>")
+    add_test(NAME quanta_runtime
+        COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/test/native/run_test.py"
+            "$<TARGET_FILE:xlang3>" "${PROJECT_SOURCE_DIR}/test/native/quanta_runtime.py")
+    add_test(NAME quanta_cpython_bridge
+        COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/test/native/run_test.py"
+            "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/test/native/quanta_runtime.py"
+            "$<TARGET_FILE_DIR:Quanta>")
+    set_tests_properties(quanta_runtime quanta_cpython_bridge quanta_sdk PROPERTIES TIMEOUT 70)
 endif()

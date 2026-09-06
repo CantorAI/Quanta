@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 #include <filesystem>
-#include "xpackage.h"
+#include "quanta_runtime.h"
 
 namespace fs = std::filesystem;
 
@@ -25,7 +25,7 @@ namespace Quanta
         static fs::path GetVdbPath(const fs::path& basePath, const std::string& prefix, const std::string& tsPartition, int customIndex, const std::string& bucketStr);
         
         // WAL Methods
-        static bool AppendWalRecord(const fs::path& basePath, const std::string& active_wal_filename, const std::vector<unsigned long long>& extIds, const std::vector<std::string>& chunkTexts, long long timestampMs, const float* vectors, size_t count, int dimension);
+        static bool AppendWalRecord(const fs::path& basePath, const std::string& active_wal_filename, const std::vector<unsigned long long>& extIds, const std::vector<std::string>& chunkTexts, long long timestampMs, const float* vectors, size_t count, int dimension, size_t first = 0);
             
         static bool ReadWalFile(const fs::path& walPath, std::vector<char>& outBuffer);
     };

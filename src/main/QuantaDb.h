@@ -2,15 +2,15 @@
 #pragma once
 #include "singleton.h"
 #include <string>
-#include "value.h"
+#include "quanta_runtime.h"
 #include <functional>
 
 namespace Quanta
 {
-    class QuantaDb :
-        public Singleton<QuantaDb>
+    class QuantaDb
     {
     private:
+        X3PackageHost* host_;
         X::Value m_sqlite;
         X::Value m_db;
         X::Value m_statment;
@@ -18,6 +18,9 @@ namespace Quanta
         bool CheckTableExist(std::string tableName);
         void BuildTables();
     public:
+        explicit QuantaDb(X3PackageHost* host) : host_(host) {}
+        ~QuantaDb() { try { Close(); } catch (...) {} }
+        X3PackageHost* Host() const { return host_; }
         X::Value& Sqlite() { return m_sqlite; }
         X::Value& Db() { return m_db; }
         X::Value& Statment() { return m_statment; }

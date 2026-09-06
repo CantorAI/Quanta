@@ -30,7 +30,7 @@ namespace Quanta {
 
         vdb_->Load(vdbPath.string());
         count_ = vdb_->GetSize();
-        total_inserted_count_ = count_;
+        total_inserted_count_ = count_.load();
 
         index_->Load(hnswPath.string());
         is_historical_read_ = true;
@@ -69,7 +69,7 @@ namespace Quanta {
             index_->Resize(new_max);
         }
         
-        index_->AddVectors(internalIndices, vectorData, 1, 1);
+        index_->AddVectors(internalIndices, vectorData, dimension_, 1);
         count_ = new_total;
         is_dirty_ = true;
         is_historical_read_ = false;
@@ -132,6 +132,12 @@ namespace Quanta {
     std::vector<float> VdbBucket::GetVectorById(unsigned long long internalId) {
         std::lock_guard<std::mutex> plock(bucket_lock_);
         return index_->GetVectorById(internalId);
+    }
+
+    std::vector<float> VdbBucket::GetVectorByExternalId(unsigned long long externalId) {
+        std::lock_guard<std::mutex> lock(bucket_lock_);
+        const auto index = vdb_->GetIndexById(externalId);
+        return index < 0 ? std::vector<float>{} : index_->GetVectorById(static_cast<unsigned long long>(index));
     }
 
     unsigned long long VdbBucket::GetIdByIndex(unsigned long long internalIdx) {

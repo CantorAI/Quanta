@@ -8,8 +8,8 @@
 - **Autonomous Memory Defense:** 
   - **TTL Eviction:** Automatically identifies idle partitions and flushes them from RAM to disk.
   - **LRU Query Swapping:** Protects the system from massive historical queries (e.g., searching 3 months of data) by throttling loaded read-only partitions, exchanging disk I/O for 100% memory safety.
-- **WAL Async Merging Pipeline:** High-throughput synchronous fast-path writing with background OpenMP-parallelized graph compilation. Ensures zero data loss without blocking active streams.
-- **GIL-Bypassing Singleton:** Deeply integrated via XLang, allowing dozens of parallel Python worker pipelines to share a single C++ native memory space.
+- **WAL Async Merging Pipeline:** Owned insertion queues and background graph construction. Explicit close drains insertion; background failures are exposed through `GetHealth()["error"]`.
+- **XLang3 Native C++ Package:** Uses the public C++ SDK over the C ABI, with database caches isolated per runtime and optional CPython bridge access.
 
 📖 **For an in-depth understanding of the internal design, please refer to the [Architecture Documentation](doc/quanta_vdb_architecture.md).**
 
@@ -17,48 +17,59 @@
 
 ## 🛠 Compilation & Build
 
-Quanta is a C++ native extension that depends on the `xlang` engine. 
+Quanta is a C++ native extension that depends on `xlang3/sdk` and `xlang3_runtime`.
 
-For complete build instructions (including cloning dependencies and running `build.bat` / `build.sh`), please see:
+Build from the CantorAI workspace using Visual Studio 2026 and Release configuration. See:
 👉 **[doc/BUILD.md](doc/BUILD.md)**
 
 ---
 
 ## ⚡ Quick Start Example
 
-Quanta runs effortlessly inside Python via the XLang interop layer, entirely bypassing the GIL for native speed.
+Run this Python code with `xlang3.exe`. CPython callers can instead use
+`import xlang3` and `xlang3.importModule("quanta", fromPath="Quanta")`.
 
 ```python
 import time
-import numpy as np
-import xlang
+import tensor as T
 
-# 1. Load the native Quanta C++ module into the XLang engine
-quanta = xlang.importModule("quanta", fromPath="Quanta")
+# 1. Load the native Quanta C++ module
+from Quanta import quanta
 
 # 2. Initialize the partitioned VDB with temporal sharding
 vdb = quanta.partitioned_vdb(
     prefix="vision",
     path="./my_vectors",
     dim=512,
-    granularity="monthly"
+    granularity="monthly",
+    wal_cooling_time_seconds=1
 )
 
 # 3. Insert a vector (automatically placed into the correct time-tag partition)
-emb = np.random.randn(512).astype(np.float32)
-emb = emb / np.linalg.norm(emb) # Normalize
+emb = T.tensor([1.] + [0.] * 511, dtype=T.float32)
 now_ms = int(time.time() * 1000)
 
 vdb.AddVectors(1001, emb, timestamp=now_ms, partition="camera_01", chunks="metadata")
 
 # 4. Search isolated to a specific time range and tag
 ts_start = now_ms - (15 * 24 * 3600 * 1000) # Last 15 days
-results = vdb.Lookup(emb, 3, partition="camera_01", ts_start=ts_start, ts_end=now_ms)
+deadline = time.time() + 15
+results = []
+while not results and time.time() < deadline:
+    if vdb.GetHealth()["error"]:
+        raise RuntimeError(vdb.GetHealth()["error"])
+    results = vdb.Lookup(emb, 3, partition="camera_01", ts_start=ts_start, ts_end=now_ms)
+    if not results:
+        time.sleep(.1)
 
 for r in results:
-    # returns: (id, similarity_score, metadata_chunk, partition_key)
+    # Each row: [id, similarity_score, metadata_chunk, partition_key, timestamp_ms]
     print(f"Match ID: {r[0]}, Score: {r[1]:.4f}")
+vdb.Close()
 ```
+
+See [native tests](test/native/README.md) for SDK, tensor, CPython bridge,
+concurrency, persistence, and shutdown coverage. Existing `.x` scripts are unchanged.
 
 ## 📄 License
 This project is open-sourced under the [Apache License, Version 2.0](LICENSE).

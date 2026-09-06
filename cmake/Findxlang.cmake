@@ -1,13 +1,5 @@
-
-FIND_PATH(XLANG_INCLUDE_DIR NAMES "xlang.h"
-                           PATHS ../xlang/Api ../../XF/xlang/Api
-                           ENV INCLUDE DOC "Directory containing xlang.h include file")
-
-
-IF (XLANG_INCLUDE_DIR)
-   SET(XLANG_FOUND TRUE)
-   get_filename_component(XLANG_DIR ${XLANG_INCLUDE_DIR} DIRECTORY)
-    message(STATUS "XLANG_INCLUDE_DIR=${XLANG_INCLUDE_DIR},and XLANG=${XLANG_DIR}")
-ELSE()
-    message(STATUS "xlang: not found")
-ENDIF (XLANG_INCLUDE_DIR)
+find_path(XLANG_INCLUDE_DIR NAMES xlang3/xlang3.h
+    HINTS "${CMAKE_CURRENT_LIST_DIR}/../../xlang3/sdk"
+    DOC "XLang3 SDK include directory")
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(xlang REQUIRED_VARS XLANG_INCLUDE_DIR)

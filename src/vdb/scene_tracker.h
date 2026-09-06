@@ -1,5 +1,5 @@
 #pragma once
-#include "xpackage.h"
+#include "quanta_runtime.h"
 #include <vector>
 #include <string>
 #include <cmath>
@@ -22,11 +22,10 @@ namespace Quanta
     };
 
     // Single-stream scene tracker (one per IPC, Python manages per-device dict).
-    // Uses AddVarClass<SceneTracker, PartitionedVdb> pattern:
-    //   parent VDB* is auto-extracted from context.
     class SceneTracker
     {
         PartitionedVdb* vdb_ = nullptr;
+        X::Value owner_;
         
         // Algorithms Configuration
         float threshold_ = 0.85f;
@@ -47,15 +46,13 @@ namespace Quanta
             APISET().AddFunc<0>("GetState", &SceneTracker::GetState);
         END_PACKAGE
 
-        // Parent-aware constructor (called by AddVarClass<SceneTracker, PartitionedVdb>)
-        SceneTracker(PartitionedVdb* parent, X::ARGS& params, X::KWARGS& kwParams);
+        SceneTracker(X::Value parent, const X::ARGS& params, const X::KWARGS& kwParams);
         virtual ~SceneTracker() = default;
 
         // Append a new frame
         // params[0] = image_id (long long)
         // kwargs: timestamp, partitionTag, score, embedding
-        void Append(X::XRuntime* rt, X::XObj* pContext,
-            X::ARGS& params, X::KWARGS& kwParams, X::Value& retValue);
+        X::Value Append(const X::ARGS& params, const X::KWARGS& kwParams);
 
         void Reset();
         X::Value GetState();

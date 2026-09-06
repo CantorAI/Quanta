@@ -5,7 +5,7 @@
 #include <mutex>
 #include <vector>
 #include <filesystem>
-#include "xpackage.h"
+#include "quanta_runtime.h"
 
 namespace Quanta {
     class VectorDatabase;
@@ -29,6 +29,7 @@ namespace Quanta {
         std::vector<std::pair<unsigned long long, float>> Lookup(const std::vector<float>& query, int topK);
         
         std::vector<float> GetVectorById(unsigned long long internalId);
+        std::vector<float> GetVectorByExternalId(unsigned long long externalId);
         unsigned long long GetIdByIndex(unsigned long long internalIdx);
         std::string GetTextById(unsigned long long extId);
         unsigned long long GetTimestampById(unsigned long long extId);
@@ -70,7 +71,7 @@ namespace Quanta {
         std::unique_ptr<HnswVdb> index_;
         
         std::string key_;
-        size_t count_ = 0;
+        std::atomic<size_t> count_{0};
         int dimension_;
         std::string spaceName_;
         size_t maxElements_;
