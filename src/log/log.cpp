@@ -32,7 +32,8 @@ Quanta::Log& Quanta::Log::SetCurInfo(const char* fileName,
 
 		const int buf_Len = 1000;
 		char szFilter[buf_Len];
-		SPRINTF(szFilter, buf_Len, "[%d-%d-%llu,%s:%d] ", pid, tid, ts, strFileName.c_str(), line);
+		SPRINTF(szFilter, buf_Len, "[%lu-%lu-%lld,%s:%d] ", pid, tid,
+			static_cast<long long>(ts), strFileName.c_str(), line);
 		std::clog << szFilter;
 	}
 	return *this;
