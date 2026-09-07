@@ -24,8 +24,8 @@ DIM = 512
 IMAGE_DIR = r"D:\CantorStorage\Uploads\2026"
 
 # ── XLang / Quanta import ─────────────────────────────────────────
-import xlang
-quanta = xlang.importModule("quanta", fromPath="Quanta")
+import xlang3
+quanta = xlang3.importModule("quanta", fromPath="Quanta")
 
 
 # ── Helpers ────────────────────────────────────────────────────────
@@ -322,8 +322,8 @@ class TestCrashResilience(unittest.TestCase):
         with open(crash_script, "w") as f:
             f.write(f'''
 import os, sys, time, numpy as np
-import xlang
-quanta = xlang.importModule("quanta", fromPath="Quanta")
+import xlang3
+quanta = xlang3.importModule("quanta", fromPath="Quanta")
 
 vdb = quanta.partitioned_vdb(
     prefix="test", path=r"{VDB_PATH}", dim={DIM}, granularity="monthly"
@@ -398,7 +398,7 @@ class TestSingletonViaCantor(unittest.TestCase):
     def _get_cantor(self):
         """Connect to Cantor via LRPC, skip test if not available."""
         try:
-            cantor = xlang.importModule("cantor", thru="lrpc:1000")
+            cantor = xlang3.importModule("cantor", thru="lrpc:1000")
             # Quick connectivity check
             cantor.GetRootPath()
             return cantor

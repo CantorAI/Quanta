@@ -9,7 +9,7 @@ xlang_bin_dir = "D:\\CantorAI\\out\\build\\x64-Debug\\bin"
 os.environ["PATH"] += os.pathsep + xlang_bin_dir
 sys.path.append(xlang_bin_dir)
 
-import xlang
+import xlang3
 
 def print_dir_state(test_dir, phase=""):
     print(f"\n--- Directory State [{phase}] ---", flush=True)
@@ -59,7 +59,7 @@ def main():
         print(f"[+] Verified {wals_left} orphaned WAL(s) remain on disk, simulating a true power-loss event.", flush=True)
         
     print("\n[Phase 4] Rebooting Quanta Instance to trigger `Init()` Async WAL Recovery...", flush=True)
-    quanta = xlang.importModule("quanta", fromPath="Quanta")
+    quanta = xlang3.importModule("quanta", fromPath="Quanta")
     
     start_time = time.time()
     recovery_db = quanta.partitioned_vdb(

@@ -5,9 +5,9 @@ xlang_bin_dir = "D:\\CantorAI\\out\\build\\x64-Debug\\bin"
 os.environ["PATH"] += os.pathsep + xlang_bin_dir
 sys.path.append(xlang_bin_dir)
 
-import xlang
+import xlang3
 
-quanta = xlang.importModule("quanta", fromPath="Quanta")
+quanta = xlang3.importModule("quanta", fromPath="Quanta")
 
 db_path = "D:\\CantorStorage-SH\\vdb\\clip_512"
 print(f"Loading PartitionedVdb from {db_path}...")

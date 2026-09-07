@@ -7,7 +7,7 @@ xlang_bin_dir = "D:\\CantorAI\\out\\build\\x64-Debug\\bin"
 os.environ["PATH"] += os.pathsep + xlang_bin_dir
 sys.path.append(xlang_bin_dir)
 
-import xlang
+import xlang3
 import numpy as np
 
 def print_dir_state(test_dir, phase=""):
@@ -34,7 +34,7 @@ def init_engine(db_path, cooling_sec=3):
     except:
         pass
 
-    quanta = xlang.importModule("quanta", fromPath="Quanta")
+    quanta = xlang3.importModule("quanta", fromPath="Quanta")
     engine = quanta.partitioned_vdb(path=db_path, prefix="cool_test", dimension=512, granularity="hourly", max_memory_gb=0.1, wal_cooling_time_seconds=cooling_sec)
     return engine
 
@@ -118,7 +118,7 @@ def test_crash_orphans_recovery():
     
     # Re-init (this should instantly queue orphaned WALs and merge them independently of Cooling Time)
     print("  -> Rebooting system (Init should spot orphaned WAL instantly).")
-    quanta2 = xlang.importModule("quanta", fromPath="Quanta")
+    quanta2 = xlang3.importModule("quanta", fromPath="Quanta")
     engine2 = quanta2.partitioned_vdb(path=db_path, prefix="cool_test", dimension=512, granularity="hourly", max_memory_gb=0.1, wal_cooling_time_seconds=1000)
     
     # Wait briefly for background thread to consume the pending queue

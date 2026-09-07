@@ -6,7 +6,7 @@ xlang_bin_dir = "D:\\CantorAI\\out\\build\\x64-Debug\\bin"
 os.environ["PATH"] += os.pathsep + xlang_bin_dir
 sys.path.append(xlang_bin_dir)
 
-import xlang
+import xlang3
 
 # 2. Add CantorModel to path for CLIP Embedding Extraction
 vision_model_dir = "D:\\CantorAI\\CantorModel\\VisionDetect"
@@ -27,7 +27,7 @@ def main():
     print("\n[+] Routing Cantor RPC over lrpc:1000...")
     try:
         # Standard LRPC connection natively bypassing process lock limits
-        cantor = xlang.importModule("cantor", thru="lrpc:1000")
+        cantor = xlang3.importModule("cantor", thru="lrpc:1000")
         quanta = cantor.QueryModule("quanta")
     except Exception as e:
         print(f"[-] FAILED to bind to running Cantor RPC node! Ensure CantorAI is active. {e}")

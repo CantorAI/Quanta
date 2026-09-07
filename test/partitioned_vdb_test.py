@@ -2,8 +2,8 @@ import os
 import time
 import numpy as np
 
-import xlang
-quanta = xlang.importModule("quanta", fromPath="Quanta")
+import xlang3
+quanta = xlang3.importModule("quanta", fromPath="Quanta")
 
 # Setup
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

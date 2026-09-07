@@ -8,8 +8,8 @@ import torch
 import clip
 import numpy as np
 
-import xlang
-quanta = xlang.importModule("quanta", fromPath="Quanta")
+import xlang3
+quanta = xlang3.importModule("quanta", fromPath="Quanta")
 
 # Load CLIP model
 device = "cuda" if torch.cuda.is_available() else "cpu"

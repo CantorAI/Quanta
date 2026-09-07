@@ -1,9 +1,9 @@
-import xlang
+import xlang3
 import time
 import numpy as np
 
 def test_ttl():
-    quanta = xlang.importModule("quanta", fromPath="Quanta")
+    quanta = xlang3.importModule("quanta", fromPath="Quanta")
 
     print("[Quanta TTL Test] Creating VDB instance with 1-minute TTL and 5-sec auto save...")
     vdb = quanta.partitioned_vdb(

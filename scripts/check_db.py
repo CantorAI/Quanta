@@ -8,8 +8,8 @@ xlang_bin_dir = "D:\\CantorAI\\out\\build\\x64-Debug\\bin"
 os.environ["PATH"] += os.pathsep + xlang_bin_dir
 sys.path.append(xlang_bin_dir)
 
-import xlang
-quanta = xlang.importModule("quanta", fromPath="Quanta")
+import xlang3
+quanta = xlang3.importModule("quanta", fromPath="Quanta")
 
 def get_default_prefix(path):
     """Scan the path for a _config.db file to determine the prefix."""

@@ -7,8 +7,8 @@ xlang_bin_dir = "D:\\CantorAI\\out\\build\\x64-Debug\\bin"
 os.environ["PATH"] += os.pathsep + xlang_bin_dir
 sys.path.append(xlang_bin_dir)
 
-import xlang
-quanta = xlang.importModule("quanta", fromPath="Quanta")
+import xlang3
+quanta = xlang3.importModule("quanta", fromPath="Quanta")
 
 def run_worker():
     crash_dir = "D:\\CantorAI\\Quanta\\test\\data\\vdb_crash_test"
