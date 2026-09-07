@@ -6,12 +6,15 @@
 
 namespace Quanta {
 class QuantaHost {
+    X::Value sqlite_;
     std::shared_ptr<QuantaContext> context_;
     std::shared_ptr<VdbCache> cache_ = std::make_shared<VdbCache>();
 public:
     explicit QuantaHost(X3PackageHost* host) : context_(std::make_shared<QuantaContext>(host)) {}
     ~QuantaHost();
     void OnPackageCreated(X::Package<QuantaHost>* package) {
+        // Load the dependency before Quanta registration completes so it outlives cache shutdown.
+        sqlite_ = Import(package->host(), "xlang_sqlite3", "sqlite");
         context_->tracker_class = package->GetValue("SceneTracker");
         context_->metric_class = package->GetValue("_Metric");
     }
