@@ -1590,16 +1590,18 @@ namespace Quanta
                 // For small G the overhead of OMP outweighs the benefit.
                 // Only go parallel when there are enough groups to amortize launch cost.
                 if (G >= 16) {
-#pragma omp parallel for schedule(static) reduction(max: bestSim)
-                    for (long long g = 0; g < static_cast<long long>(G); ++g) {
-                        float sim = 0.0f;
-                        const float* c = centroids[g].data();
-                        for (size_t d = 0; d < dim; ++d) sim += vec[d] * c[d];
-                        if (sim > bestSim) {
-                            bestSim  = sim;
-                            // NOTE: bestGroup update is not safe inside OMP max reduction.
-                            // We re-scan serially below in that case.
+#pragma omp parallel
+                    {
+                        float threadBest = -2.0f;
+#pragma omp for schedule(static)
+                        for (long long g = 0; g < static_cast<long long>(G); ++g) {
+                            float sim = 0.0f;
+                            const float* c = centroids[g].data();
+                            for (size_t d = 0; d < dim; ++d) sim += vec[d] * c[d];
+                            threadBest = std::max(threadBest, sim);
                         }
+#pragma omp critical(quanta_centroid_max)
+                        { bestSim = std::max(bestSim, threadBest); }
                     }
                     // Re-scan serially to find which group achieved bestSim
                     // (OMP reduction only tracks the max value, not the index).

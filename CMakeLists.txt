@@ -47,7 +47,9 @@ if(NOT TARGET xlang3_runtime)
 endif()
 target_link_libraries(Quanta PRIVATE xlang3_runtime ${CMAKE_DL_LIBS})
 if(MSVC)
-    target_compile_options(Quanta PRIVATE /openmp:llvm)
+    # The Visual Studio LLVM OpenMP runtime is not redistributable.
+    # Keep Windows code compatible with the supported OpenMP 2.0 runtime.
+    target_compile_options(Quanta PRIVATE /openmp)
 else()
     find_package(OpenMP REQUIRED COMPONENTS CXX)
     target_link_libraries(Quanta PRIVATE OpenMP::OpenMP_CXX)
